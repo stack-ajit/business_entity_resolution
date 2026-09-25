@@ -249,3 +249,16 @@ At K=100: India 91.64%, US 97.07%; S2 95.16%, S3 94.73%. The ablation ranking he
 1. **One-to-one constraint / reverse competition.** S1 is deduplicated, so each S2/S3 record belongs to at most one S1 entity. At test time every S1 is scored, so an S2/S3 record claimed by several S1 entities can be given only to its highest-p S1. This should cut false merges between look-alike S1 entities (same street, similar names) and directly helps precision.
 2. **Error analysis on validation:** split false positives and false negatives by country and source, and inspect the worst cases to design targeted features.
 3. **K / model trade-off:** try a larger learning rate (fewer trees → faster inference) and drop the zero-importance features.
+
+### Fix: the parallel feature code could exhaust memory (Kaggle run #3, second account)
+**Symptom:** during `build_training_set` ("computing features" on 7.5M pairs), the notebook showed `IOStream.flush timed out` and stalled.
+**Cause (my bug in the previous change):**
+1. **Fork + shared dicts is not really shared.** With `fork`, every worker that *reads* a record touches its Python refcount, which copies that memory page. With 4 workers scoring random candidates, each ends up copying most of the multi-GB record dictionaries.
+2. **Python tuples of floats are huge.** 7.5M rows × 30 floats as Python objects is ~7 GB, and the pool version held it twice (per-worker parts plus the flattened list).
+
+**Fix:**
+- Workers never touch the big dictionaries. The parent sends each worker only the small chunk of record tuples it scores (20K pairs).
+- Work is fed in **bounded waves** (2 chunks per worker). `Pool.imap` would drain the generator into its queue immediately and rebuild the memory problem.
+- Workers return **float32 arrays** (~120 bytes/row instead of ~1 KB). The serial path uses the same code.
+- Portable (spawn or fork). Verified on Windows: **parallel output is identical to serial**. On 514K pairs: serial 31.1 s, 4 processes 17.9 s (1.7×), 8 processes 13.5 s. Memory stays flat.
+- Notebook: `%cd /kaggle/working` before deleting and re-cloning the repo, which removes the harmless `shell-init: getcwd` warnings.

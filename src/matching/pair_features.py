@@ -9,6 +9,7 @@ Design notes:
   S1 entity) is included: "how good is this candidate compared to the others" is a
   strong signal for precision-heavy F0.5.
 """
+import itertools
 import multiprocessing as mp
 import os
 import re
@@ -86,19 +87,19 @@ FEATURES = [
 ]
 
 
-_S1, _S23 = {}, {}  # set before forking so worker processes inherit them without pickling
-
-
-def _rows(ids):
-    """Similarity rows for a list of (s1_id, s23_id) pairs, using the module-level records."""
-    rows = []
-    for a_id, b_id in ids:
-        A, B = _S1[a_id], _S23[b_id]
+def _rows(payload):
+    """
+    Similarity features for a chunk of pairs. payload = list of (A, B, is_s3) where A/B are
+    prepared record tuples. Returns a compact float32 array (n, n_features): a list of
+    Python float tuples would cost ~1 KB per pair (~7 GB for 7.5M pairs).
+    """
+    out = np.empty((len(payload), len(FEATURES) - 5), dtype=np.float32)
+    for k, (A, B, is_s3) in enumerate(payload):
         na, nb = A[5], B[5]
         shared = na & nb
         pa = {x for x in na if len(x) in (5, 6)}
         pb = {x for x in nb if len(x) in (5, 6)}
-        rows.append((
+        out[k] = (
             fuzz.ratio(A[0], B[0]), fuzz.token_set_ratio(A[0], B[0]),
             fuzz.token_sort_ratio(A[0], B[0]), fuzz.partial_ratio(A[0], B[0]),
             JaroWinkler.similarity(A[0], B[0]),
@@ -110,18 +111,24 @@ def _rows(ids):
             _jacc(na, nb), len(shared), float(bool(na) and bool(nb) and not shared), len(na), len(nb),
             max((len(x) for x in shared), default=0),
             float(bool(pa & pb)), float(bool(pa) and bool(pb) and not (pa & pb)),
-            float(B[9]), float(A[9]), float(B[8]), float(b_id.startswith("S3")),
-        ))
-    return rows
+            float(B[9]), float(A[9]), float(B[8]), float(is_s3),
+        )
+    return out
 
 
-def pair_features(cands, s1_rec, s23_rec, n_jobs=None):
+def _payloads(a_ids, b_ids, s1_rec, s23_rec, chunk):
+    for i in range(0, len(a_ids), chunk):
+        yield [(s1_rec[a], s23_rec[b], b.startswith("S3"))
+               for a, b in zip(a_ids[i:i + chunk], b_ids[i:i + chunk])]
+
+
+def pair_features(cands, s1_rec, s23_rec, n_jobs=None, chunk=20_000):
     """
     cands: DataFrame with source1_entity_id, candidate_entity_id, score. Returns features.
-    n_jobs: worker processes for the string similarities (default: all cores). Uses fork
-    (Linux/Kaggle) so records are shared copy-on-write; falls back to 1 process elsewhere.
+    n_jobs: worker processes for the string similarities (default: all cores). Workers get
+    only the small chunk of record tuples they score (never the big dicts), so memory stays
+    flat; results come back as float32 arrays. Falls back to 1 process on any pool error.
     """
-    global _S1, _S23
     c = cands.copy()
     g = c.groupby("source1_entity_id")["score"]
     c["rank"] = g.rank(ascending=False, method="first")
@@ -130,19 +137,23 @@ def pair_features(cands, s1_rec, s23_rec, n_jobs=None):
     c["score_gap_best"] = best - c["score"]
     c["n_cands"] = g.transform("size")
 
-    _S1, _S23 = s1_rec, s23_rec
-    ids = list(zip(c["source1_entity_id"].values, c["candidate_entity_id"].values))
+    a_ids = c["source1_entity_id"].values
+    b_ids = c["candidate_entity_id"].values
     n_jobs = n_jobs or os.cpu_count() or 1
-    rows = None
-    if n_jobs > 1 and len(ids) > 200_000 and "fork" in mp.get_all_start_methods():
+    parts = None
+    if n_jobs > 1 and len(c) > 4 * chunk:
         try:
-            step = -(-len(ids) // (n_jobs * 4))
-            with mp.get_context("fork").Pool(n_jobs) as pool:
-                parts = pool.map(_rows, [ids[i:i + step] for i in range(0, len(ids), step)])
-            rows = [r for part in parts for r in part]
+            parts = []
+            gen = _payloads(a_ids, b_ids, s1_rec, s23_rec, chunk)
+            with mp.Pool(n_jobs) as pool:
+                # bounded waves: Pool.imap would drain the generator into its queue at once
+                while wave := list(itertools.islice(gen, n_jobs * 2)):
+                    parts += pool.map(_rows, wave, chunksize=1)
         except Exception as e:  # never lose a long run to a pool problem
             print(f"parallel features failed ({e!r}), falling back to 1 process", flush=True)
-    if rows is None:
-        rows = _rows(ids)
-    F = pd.DataFrame(rows, columns=FEATURES[5:], index=c.index)
+            parts = None
+    if parts is None:
+        parts = [_rows(p) for p in _payloads(a_ids, b_ids, s1_rec, s23_rec, chunk)]
+    X = np.vstack(parts) if parts else np.empty((0, len(FEATURES) - 5), np.float32)
+    F = pd.DataFrame(X, columns=FEATURES[5:], index=c.index)
     return pd.concat([c[["source1_entity_id", "candidate_entity_id"] + FEATURES[:5]], F], axis=1)
