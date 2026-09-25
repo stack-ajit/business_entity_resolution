@@ -38,3 +38,31 @@
 [   1315s] hashed chunk 37 from train_source3.tsv: 250000 rows
 [   1353s] hashed chunk 38 from train_source3.tsv: 250000 rows
 [   1393s] hashed chunk 39 from train_source3.tsv: 250000 rows
+[   1433s] hashed chunk 40 from train_source3.tsv: 250000 rows
+[   1471s] hashed chunk 41 from train_source3.tsv: 250000 rows
+[   1477s] hashed chunk 42 from train_source3.tsv: 35603 rows
+[   1491s] country India: shard 0 with 2003911 rows
+[   1514s] country India: shard 1 with 2014892 rows
+[   1515s] country India: shard 2 with 114543 rows
+[   1542s] country US: shard 0 with 2097408 rows
+[   1553s] country US: shard 1 with 2118139 rows
+[   1564s] country US: shard 2 with 1971326 rows
+[   1568s] country India: queries 0-3973 of 3973 done in 3s
+[   1572s] country US: queries 0-6027 of 6027 done in 4s
+
+true pairs: 34567   queries: 10000
+recall@K  (candidates per S1 = K)
+  K=   5  recall=0.7284  pairs=50000
+  K=  10  recall=0.8328  pairs=100000
+  K=  20  recall=0.8841  pairs=200000
+  K=  30  recall=0.9052  pairs=300000
+  K=  50  recall=0.9251  pairs=499981
+  K=  75  recall=0.9373  pairs=749857
+  K= 100  recall=0.9446  pairs=999614
+  score>=0.3*best  recall=0.9111  pairs=351429
+  score>=0.4*best  recall=0.8566  pairs=205339
+  score>=0.5*best  recall=0.7801  pairs=125714
+  score>=0.6*best  recall=0.6944  pairs=76960
+recall by country @top_k: {'India': 0.9138, 'US': 0.9645}
+recall by source  @top_k: {'S2': 0.9448, 'S3': 0.9445}
+[   1575s] done

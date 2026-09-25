@@ -1,6 +1,10 @@
 import pandas as pd
 import numpy as np
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from config import TRAIN_DIR, SAMPLE_DIR
 
 def create_sample(data_dir, output_dir, sample_size=10000):
     os.makedirs(output_dir, exist_ok=True)
@@ -47,7 +51,5 @@ def create_sample(data_dir, output_dir, sample_size=10000):
         print(f"Saved sample_{source}.tsv with {len(sampled_df)} rows.")
 
 if __name__ == "__main__":
-    TRAIN_DIR = r"c:\Users\BIT\Downloads\amazon_ml_2026\student_resource\dataset\train"
-    OUT_DIR = r"c:\Users\BIT\Downloads\amazon_ml_2026\data\sample"
-    create_sample(TRAIN_DIR, OUT_DIR, sample_size=10000)
+    create_sample(TRAIN_DIR, SAMPLE_DIR, sample_size=10000)
     print("Sampling complete!")

@@ -17,10 +17,7 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from blocking.tfidf_blocking import build_index, query_index
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-TRAIN = os.path.join(ROOT, "student_resource", "dataset", "train")
-SAMPLE = os.path.join(ROOT, "data", "sample")
-CACHE = os.path.join(ROOT, "data", "cache", "train_index")
+from config import TRAIN_DIR as TRAIN, SAMPLE_DIR as SAMPLE, TRAIN_INDEX as CACHE, CACHE_DIR
 
 T0 = time.time()
 
@@ -78,8 +75,8 @@ def main():
     print("recall by country @top_k:", by_country.groupby("country")["found"].mean().round(4).to_dict())
     by_country["src"] = by_country.candidate_entity_id.str[:2]
     print("recall by source  @top_k:", by_country.groupby("src")["found"].mean().round(4).to_dict())
-    os.makedirs(os.path.join(ROOT, "data", "cache"), exist_ok=True)
-    missed.to_csv(os.path.join(ROOT, "data", "cache", "missed_pairs.tsv"), sep="\t", index=False)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    missed.to_csv(os.path.join(CACHE_DIR, "missed_pairs.tsv"), sep="\t", index=False)
     log("done")
 
 

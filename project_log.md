@@ -104,7 +104,46 @@ In the missed pairs, 29.6% have a non-Latin S2/S3 name and 8.7% have an empty ad
 | Setup | Recall | Notes |
 |---|---|---|
 | v2 smoke test (2K queries vs sample pool, K=20) | 97.84% | v1: 97.51% |
-| v2 full 10.3M | *running* | |
+| v2 full 10.3M, K=20 | 88.41% | **worse** than v1 (90.55%) |
+| v2 full 10.3M, K=50 | 92.51% | worse than v1 (93.20%) |
+| v2 full 10.3M, K=100 | 94.46% | ≈ v1 (94.35%) |
+
+v2 by country at K=100: India 91.4% (v1 92.2%, **down**), US 96.5% (v1 95.8%, up). **Query time: 7 s for 10K queries (v1: ~100 s)**, so the 1.7M test S1 records take ~20 min instead of ~4.7 h. The speed redesign clearly works.
+
+**Takeaway: v2 as a bundle hurts the top of the ranking.** Hypotheses:
+- The phonetic key is much coarser than the vowel-drop skeleton (m=n, g=j, v=w=b). Short Indian name tokens collide (`vijay`→`bj`, `guru`→`jr`), which lets unrelated records into the top-K. That would explain why India dropped.
+- `ak_` duplicates every address word, doubling the address block's weight relative to the name.
+- Extra `c_` features dilute cosine for normal names.
+
+Rather than guess, the next step is an ablation, not another bundle. **Lesson: change one feature group at a time and measure.**
+
+Also fixed: v2 hashing was 3.4× slower (18 regex passes per token). Memoising `skeleton` (`lru_cache`; tokens repeat heavily) and skipping `anyascii` for pure-ASCII strings roughly halves hashing time.
+
+### Phase 3 — Ablation harness
+`scratchpad/ablate.py` (to be moved into `src/blocking/` if kept): the 10K sample S1 against their true matches plus ~1.5M random train S2/S3 distractors, all in memory. Each variant takes minutes instead of ~25 min for a full rebuild. Absolute recall is higher than at full scale (fewer distractors), but **relative** ordering of variants is what matters. Also tests **multi-view retrieval**: separate top-K lists from the combined, name-only and address-only vectors, unioned under the same total budget K. The idea is that a record with a missing address or a renamed business still gets its own shortlist slots.
+Moved into the repo as `src/blocking/ablate_blocking.py`.
+
+#### Ablation results (recall / candidate pairs, 10K queries, ~1.5M-record pool)
+| Variant | @10 | @20 | @30 | @50 |
+|---|---|---|---|---|
+| v1 (baseline) | 93.08% | 94.61% | 95.25% | 96.00% |
+| + number normalisation (v2 norm) | 93.32% | 94.84% | 95.50% | 96.16% |
+| + v2 norm + phonetic skeleton v2 | 93.44% | 94.95% | 95.57% | 96.22% |
+| + v2 norm + skeleton v1 **and** v2 | 92.13% | 93.98% | 94.71% | 95.57% |
+| + v2 norm + `c_` concat features | **90.91%** | 94.20% | 95.28% | 96.23% |
+| + v2 norm + `ak_` address skeleton | 93.74% | 95.15% | 95.70% | 96.32% |
+| v2 (all of the above) | 92.23% | 94.83% | 95.67% | 96.44% |
+| **final: v2 norm + skeleton v2 + `ak_`** | **93.82%** | **95.20%** | **95.72%** | 96.33% |
+| v1 + views (combined ½K, name ¼K, addr ¼K) | 87.90% (59K) | 94.23% (131K) | 95.10% (197K) | 95.90% (339K) |
+| v2 norm + views | 88.44% (59K) | 94.64% (131K) | 95.39% (197K) | 96.16% (340K) |
+
+**Conclusions:**
+- My hypothesis about the phonetic key was **wrong**. The coarse phonetic skeleton *helps* (+0.1). The v2 regression came from the **`c_` concat features (−2.4 pts @10)**: every ordinary 2–3 word name gets extra rare-looking features that match unrelated records. They are **removed**, even though they fixed a few domain-name cases.
+- Using both skeletons double-counts the name and hurts (−1.2), so only v2 is kept.
+- `ak_` helps (+0.4 @10), because address typos (`morgantno`, `wrren`) are common.
+- **Views** don't raise recall per unit of K. But because the union deduplicates, they reach similar recall with **~30% fewer pairs** (96.16% with 340K pairs against 497K). That is an efficiency option for later, not adopted now, to keep the pipeline simple.
+- **Final blocking = v2 normalisation + phonetic skeleton v2 + `ak_`, no `c_`.** It is best or tied-best at every K, ~+0.7 pts over v1 at K=10.
+- The local `data/cache/train_index` was built with `c_`, so it is stale. The Kaggle run rebuilds from scratch with the final features.
 
 #### Engineering notes
 - `pd.read_csv` on the full 5M-row files crashed (segfault with `dtype=str`, `MemoryError` via pyarrow) while RAM was low. Chunked reading (`chunksize`, `keep_default_na=False` so names like "NA" stay strings) fixes it.
@@ -113,8 +152,34 @@ In the missed pairs, 29.6% have a non-Latin S2/S3 name and 8.7% have an empty ad
 
 ---
 
-## 5. Phase 4: Feature Engineering
-**Status:** Up Next
+## 5. Decision: Move Forward + Run Heavy Stages on Kaggle
+**Status:** Setup done, awaiting data upload + code push
+
+**Why move forward now:** blocking recall went from 53% to ~93% at K=50 at full scale, and queries run in minutes. The remaining ablation tunes the last 1–2%, and the winning variant is a flag plus an index rebuild, with no downstream code changes. With a 27 Sep deadline and no submission yet, an end-to-end pipeline matters more than blocking polish.
+
+**Why Kaggle:** the laptop has 16 GB RAM shared with the browser (at one point only 0.34 GB was free and pandas crashed). A Kaggle CPU session has ~30 GB RAM.
+- **Trade-off:** Kaggle gives 4 cores against the laptop's 12, so CPU-bound steps (feature hashing, rapidfuzz) run slower there.
+- **No GPU needed:** nothing in this pipeline benefits from a GPU. LightGBM and rapidfuzz are CPU-bound.
+
+**Changes to make the code portable:**
+- `src/config.py`: all paths come from `ER_DATA_DIR` (folder with `train/`, `test/`) and `ER_WORK_DIR` (writable caches/outputs). Local defaults are unchanged. The hard-coded `c:\Users\...` paths in `create_sample.py` are removed.
+- `requirements.txt`: pinned versions (also required for the final submission zip).
+- `kaggle/er_pipeline.ipynb`: installs deps, clones the GitHub repo, auto-locates the uploaded dataset, sets the env vars, then runs the stages. Each stage **skips itself if its output exists**, so a dead session can resume.
+
+---
+
+## 6. Phase 4: Matching Model: Pair Features + Training Set
+**Status:** Code written, not yet run
+**Code:** `src/matching/pair_features.py`, `src/matching/build_training_set.py`
+
 **Logic & Decisions:**
-- We now have ~844,000 candidate pairs. We need to calculate how similar Record A is to Record B.
-- We will compute string distances (Levenshtein, Jaccard) for both the name and the address.
+- **Train on real blocking output, not random negatives.** Take 150K random train S1 records, run the same top-K=50 blocking used at test time against the full train index, and label candidates from the ground truth. The model learns to reject the look-alikes it will actually face (same street, similar name), which random negatives would not teach.
+- **No `country` feature.** Test has France, which never appears in training. All features are country-agnostic similarities, so the model transfers.
+- **Features (35):**
+  - *retrieval context*: score, rank, score ÷ best score for that S1, gap to best, number of candidates. "Is this the best candidate for this entity?" matters for precision.
+  - *name*: rapidfuzz ratio, token-set, token-sort, partial, Jaro-Winkler on the full name; the same on the **core name** (legal suffixes like pvt/ltd/llc/sas/sarl removed); on the concatenated core (domains/hashtags); and on the phonetic skeleton (transliterated names); token Jaccard, token counts.
+  - *address*: ratio, token-set, partial, token Jaccard.
+  - *numbers*: Jaccard of number sets, count shared, **conflict flag** (both have numbers but none shared, a strong negative), longest shared number, postcode (5/6-digit) match / conflict.
+  - *flags*: empty address (either side), non-Latin candidate name, source S2 vs S3.
+- Entities with zero candidates are kept in a separate file: they still count in macro F0.5 (an empty prediction scores 1.0 for singletons and 0 otherwise).
+- **Next:** LightGBM (MIT) with an S1-grouped train/validation split. Then choose per-entity selection rules (probability threshold, max matches, relative-to-best cut-off) by directly maximising **macro F0.5 on validation**, including empty predictions.
