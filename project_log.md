@@ -218,3 +218,34 @@ At K=100: India 91.64%, US 97.07%; S2 95.16%, S3 94.73%. The ablation ranking he
 - **Streaming test inference.** 1.7M S1 × 50 = ~86M pairs cannot be held in memory. S1 is processed in 100K batches: retrieve → features → predict → select. S2/S3 raw strings are read once (`load_raw`) and prepared lazily per batch for only the candidate IDs.
 - **Outputs follow the spec**: `candidate_pairs.tsv` = exactly the pairs the model scored (the last stage before the model, as the rules require); `matching_results.tsv` ⊆ candidates. Both have one row per S1 entity, empty when nothing. The official `validate_submission.py` runs automatically at the end.
 - **Smoke test** (sample data standing in for both train and test; numbers only prove the plumbing): the validator passes, and 10,000 rows are written to both files.
+
+### Kaggle run #2: first trained model (validation = 30K held-out train S1 entities)
+| Metric | Value |
+|---|---|
+| **Validation macro F0.5 (tuned rule)** | **0.9425** |
+| Oracle F0.5 (perfect classifier on our candidates) | 0.9770 |
+| All-empty baseline (predict only singletons) | 0.0538 |
+| Top-1 match with p ≥ 0.5 | 0.6798 |
+| LightGBM best iteration (lr 0.05, early stopping) | 1864, val log-loss 0.01348 |
+| Tuned rule | threshold 0.65, rel 0.7, max_matches 10 |
+
+**Reading the numbers:**
+- **Where the lost 5.75 pts go:** 2.3 pts are lost in blocking (true matches never retrieved caps us at 0.977); 3.45 pts are classifier/selection errors. Both are worth attacking, the classifier gap more so.
+- **Selection rule barely matters.** All top-10 rules are within 0.0004. Thresholds of 0.65–0.70 are best: a slightly conservative cut, as expected for F0.5. `rel` has almost no effect and `max_matches` always saturates at 10. So the gains will come from better probabilities, not smarter cut-offs.
+- **Top-1 only scores 0.68.** Entities average 3.5 matches, so returning several matches per entity is essential.
+- **Feature importance:** retrieval `score` (31%) and `rank` (29%) dominate, followed by `core_partial` (7.9%), `num_jacc` (7.6%), `addr_tset` (5.5%) and `num_conflict` (2.1%). `postcode_*`, `addr_empty_*` and `n_cands` contribute ~0. `n_cands` is constant (always 50), and the postcode signal is already captured by `num_*`.
+
+### Kaggle run #2: test inference exposed two operational problems
+1. **Speed:** ~830 s per 100K-S1 batch (≈5M pairs) → **~4 h** for 1.7M test S1. String similarities ran on 1 core, and prediction uses ~2,050 trees.
+2. **Draft sessions die.** The interactive session showed "Draft Session Starting..." mid-run, meaning it restarted and `/kaggle/working` was lost. Interactive sessions stop when the browser is idle.
+
+**Fixes:**
+- **Parallel features:** `pair_features` now splits pairs across all cores with a `fork` process pool. Records are inherited copy-on-write, so nothing is pickled going in. If the pool fails, it falls back to 1 process so a long run is never lost.
+- **Per-batch checkpoints:** each finished 100K batch is saved to `cache/test_batches_k50_b100000/`. Re-running skips finished batches and only assembles the final TSVs. Verified locally: a rerun resumes instantly and the validator still passes.
+- **Step timings** logged per batch (query / features / predict seconds) to find the next bottleneck.
+- **Notebook reworked for "Save & Run All (Commit)"**, which runs headless for up to 12 h without the browser. The full-scale recall evaluation is now optional (`RUN_BLOCKING_EVAL`); `build_train_index.py` builds only the index. All steps use `python -u` so logs stream live. A final cell deletes the indexes to keep the saved output small.
+
+### Next ideas (ranked by expected gain)
+1. **One-to-one constraint / reverse competition.** S1 is deduplicated, so each S2/S3 record belongs to at most one S1 entity. At test time every S1 is scored, so an S2/S3 record claimed by several S1 entities can be given only to its highest-p S1. This should cut false merges between look-alike S1 entities (same street, similar names) and directly helps precision.
+2. **Error analysis on validation:** split false positives and false negatives by country and source, and inspect the worst cases to design targeted features.
+3. **K / model trade-off:** try a larger learning rate (fewer trees → faster inference) and drop the zero-importance features.

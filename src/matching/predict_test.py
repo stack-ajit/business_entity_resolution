@@ -17,6 +17,7 @@ import sys
 import time
 
 import lightgbm as lgb
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -52,23 +53,42 @@ def main():
     raw = load_raw(s23_paths)
     log(f"{len(s1)} test S1 entities, {len(raw)} S2/S3 records")
 
-    cand_lists, match_lists = {}, {}
+    # Each finished batch is checkpointed, so a killed session resumes where it stopped.
+    ckpt_dir = os.path.join(CACHE_DIR, f"test_batches_k{args.top_k}_b{args.batch}")
+    os.makedirs(ckpt_dir, exist_ok=True)
     for b0 in range(0, len(s1), args.batch):
+        ckpt = os.path.join(ckpt_dir, f"batch_{b0:08d}.parquet")
+        if os.path.exists(ckpt):
+            continue
+        t = [time.time()]
         b = s1.iloc[b0:b0 + args.batch]
         cands = query_index(b["entity_id"].values, b["business_name"].values,
                             b["business_address"].values, b["country"].values, TEST_INDEX,
                             top_k=args.top_k, log=lambda m: None)
+        t.append(time.time())
+        out = pd.DataFrame(columns=["source1_entity_id", "candidate_entity_ids", "matched_entity_ids"])
         if len(cands):
             s1_rec = {i: prepare(n, a) for i, n, a in
                       zip(b["entity_id"].values, b["business_name"].values, b["business_address"].values)}
             s23_rec = {i: prepare(*raw[i]) for i in cands["candidate_entity_id"].unique()}
             F = pair_features(cands, s1_rec, s23_rec)
-            F["p"] = model.predict(F[FEATURES])
+            t.append(time.time())
+            F["p"] = model.predict(F[FEATURES], num_threads=os.cpu_count())
+            t.append(time.time())
             kept = select(F, sel["threshold"], sel["rel"], sel["max_matches"])
-            cand_lists.update(F.groupby("source1_entity_id")["candidate_entity_id"].agg(",".join))
-            match_lists.update(kept.groupby("source1_entity_id")["candidate_entity_id"].agg(",".join))
+            out = pd.concat([
+                F.groupby("source1_entity_id")["candidate_entity_id"].agg(",".join).rename("candidate_entity_ids"),
+                kept.groupby("source1_entity_id")["candidate_entity_id"].agg(",".join).rename("matched_entity_ids"),
+            ], axis=1).fillna("").rename_axis("source1_entity_id").reset_index()
+        out.to_parquet(ckpt)
+        steps = np.diff(t).round().astype(int).tolist()
         log(f"batch {b0}-{b0 + len(b)}: {len(cands)} candidates, "
-            f"{sum(1 for i in b['entity_id'] if i in match_lists)} entities with matches")
+            f"{(out['matched_entity_ids'] != '').sum()} entities with matches "
+            f"[secs query/features/predict: {steps}]")
+
+    done = pd.concat([pd.read_parquet(os.path.join(ckpt_dir, f)) for f in sorted(os.listdir(ckpt_dir))],
+                     ignore_index=True).set_index("source1_entity_id")
+    cand_lists, match_lists = done["candidate_entity_ids"], done["matched_entity_ids"]
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     ids = s1["entity_id"]

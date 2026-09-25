@@ -9,6 +9,7 @@ Design notes:
   S1 entity) is included: "how good is this candidate compared to the others" is a
   strong signal for precision-heavy F0.5.
 """
+import multiprocessing as mp
 import os
 import re
 import sys
@@ -85,19 +86,14 @@ FEATURES = [
 ]
 
 
-def pair_features(cands, s1_rec, s23_rec):
-    """cands: DataFrame with source1_entity_id, candidate_entity_id, score. Returns features."""
-    c = cands.copy()
-    g = c.groupby("source1_entity_id")["score"]
-    c["rank"] = g.rank(ascending=False, method="first")
-    best = g.transform("max")
-    c["score_rel"] = c["score"] / best
-    c["score_gap_best"] = best - c["score"]
-    c["n_cands"] = g.transform("size")
+_S1, _S23 = {}, {}  # set before forking so worker processes inherit them without pickling
 
+
+def _rows(ids):
+    """Similarity rows for a list of (s1_id, s23_id) pairs, using the module-level records."""
     rows = []
-    for a_id, b_id in zip(c["source1_entity_id"].values, c["candidate_entity_id"].values):
-        A, B = s1_rec[a_id], s23_rec[b_id]
+    for a_id, b_id in ids:
+        A, B = _S1[a_id], _S23[b_id]
         na, nb = A[5], B[5]
         shared = na & nb
         pa = {x for x in na if len(x) in (5, 6)}
@@ -116,5 +112,37 @@ def pair_features(cands, s1_rec, s23_rec):
             float(bool(pa & pb)), float(bool(pa) and bool(pb) and not (pa & pb)),
             float(B[9]), float(A[9]), float(B[8]), float(b_id.startswith("S3")),
         ))
+    return rows
+
+
+def pair_features(cands, s1_rec, s23_rec, n_jobs=None):
+    """
+    cands: DataFrame with source1_entity_id, candidate_entity_id, score. Returns features.
+    n_jobs: worker processes for the string similarities (default: all cores). Uses fork
+    (Linux/Kaggle) so records are shared copy-on-write; falls back to 1 process elsewhere.
+    """
+    global _S1, _S23
+    c = cands.copy()
+    g = c.groupby("source1_entity_id")["score"]
+    c["rank"] = g.rank(ascending=False, method="first")
+    best = g.transform("max")
+    c["score_rel"] = c["score"] / best
+    c["score_gap_best"] = best - c["score"]
+    c["n_cands"] = g.transform("size")
+
+    _S1, _S23 = s1_rec, s23_rec
+    ids = list(zip(c["source1_entity_id"].values, c["candidate_entity_id"].values))
+    n_jobs = n_jobs or os.cpu_count() or 1
+    rows = None
+    if n_jobs > 1 and len(ids) > 200_000 and "fork" in mp.get_all_start_methods():
+        try:
+            step = -(-len(ids) // (n_jobs * 4))
+            with mp.get_context("fork").Pool(n_jobs) as pool:
+                parts = pool.map(_rows, [ids[i:i + step] for i in range(0, len(ids), step)])
+            rows = [r for part in parts for r in part]
+        except Exception as e:  # never lose a long run to a pool problem
+            print(f"parallel features failed ({e!r}), falling back to 1 process", flush=True)
+    if rows is None:
+        rows = _rows(ids)
     F = pd.DataFrame(rows, columns=FEATURES[5:], index=c.index)
     return pd.concat([c[["source1_entity_id", "candidate_entity_id"] + FEATURES[:5]], F], axis=1)
