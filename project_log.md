@@ -168,8 +168,25 @@ Moved into the repo as `src/blocking/ablate_blocking.py`.
 
 ---
 
+### Kaggle run #1: final blocking confirmed at full scale (10K queries vs 10.3M train S2/S3)
+| K | v1 (local) | **final (Kaggle)** |
+|---|---|---|
+| 5 | 77.90% | **79.59%** |
+| 10 | 86.91% | **88.39%** |
+| 20 | 90.55% | **91.64%** |
+| 30 | 92.03% | **92.88%** |
+| 50 | 93.20% | **93.92%** |
+| 75 | 93.97% | **94.54%** |
+| 100 | 94.35% | **94.94%** |
+
+At K=100: India 91.64%, US 97.07%; S2 95.16%, S3 94.73%. The ablation ranking held at full scale: +0.6 to +1.5 pts at every K. Kaggle timings: index build 7.5 min (43 chunks → 6 shards); 10K queries in 5 s.
+
+**Chosen K for test = 50** (93.9% recall ceiling). K=100 adds only +1.0 pt for 2× the pairs and feature cost.
+
+---
+
 ## 6. Phase 4: Matching Model: Pair Features + Training Set
-**Status:** Code written, not yet run
+**Status:** Training set built on Kaggle. 150K train S1 → **7,499,222 pairs, 487,198 positives**, blocking recall 93.91% (consistent with the evaluation). 736 s total (features: ~310 s for 7.5M pairs).
 **Code:** `src/matching/pair_features.py`, `src/matching/build_training_set.py`
 
 **Logic & Decisions:**
@@ -183,3 +200,21 @@ Moved into the repo as `src/blocking/ablate_blocking.py`.
   - *flags*: empty address (either side), non-Latin candidate name, source S2 vs S3.
 - Entities with zero candidates are kept in a separate file: they still count in macro F0.5 (an empty prediction scores 1.0 for singletons and 0 otherwise).
 - **Next:** LightGBM (MIT) with an S1-grouped train/validation split. Then choose per-entity selection rules (probability threshold, max matches, relative-to-best cut-off) by directly maximising **macro F0.5 on validation**, including empty predictions.
+
+---
+
+## 7. Phase 5: Model Training, Selection Rule, Test Inference
+**Status:** Code written and smoke-tested end-to-end locally (validator **PASS**); first real run pending on Kaggle
+**Code:** `src/matching/train_matcher.py`, `src/matching/selection.py`, `src/matching/predict_test.py`
+
+**Logic & Decisions:**
+- **Split by S1 entity (80/20), not by row.** All candidates of an entity stay on one side, like unseen test entities. A row-level split would leak entity-level information and inflate validation.
+- **LightGBM** (MIT, CPU): 127 leaves, lr 0.05, early stopping on validation log-loss. It is refit on 100% of entities with 1.1× the best iteration count.
+- **Selection rule is tuned on the official metric, not on AUC/log-loss.** The rule keeps a candidate if `p ≥ threshold` AND `p ≥ rel × best p of that entity`, capped at `max_matches`. It is grid-searched to maximise **macro F0.5 over all validation entities**, including entities with no candidates (counted as misses or correct singletons). The same `selection.py` code runs at test time, so validation and test apply exactly the same rule.
+- **Diagnostics printed** so the score can be explained:
+  - the *oracle* F0.5 (perfect classifier on our candidates): the ceiling set by blocking;
+  - the *all-empty* baseline: what predicting only singletons earns (5.6%);
+  - *top-1 with p ≥ 0.5*: shows that picking only one match loses a lot, because entities average 3.5 matches.
+- **Streaming test inference.** 1.7M S1 × 50 = ~86M pairs cannot be held in memory. S1 is processed in 100K batches: retrieve → features → predict → select. S2/S3 raw strings are read once (`load_raw`) and prepared lazily per batch for only the candidate IDs.
+- **Outputs follow the spec**: `candidate_pairs.tsv` = exactly the pairs the model scored (the last stage before the model, as the rules require); `matching_results.tsv` ⊆ candidates. Both have one row per S1 entity, empty when nothing. The official `validate_submission.py` runs automatically at the end.
+- **Smoke test** (sample data standing in for both train and test; numbers only prove the plumbing): the validator passes, and 10,000 rows are written to both files.

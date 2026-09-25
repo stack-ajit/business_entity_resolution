@@ -40,6 +40,11 @@ def _prep(name, address):
             "".join(core), " ".join(at), nums, set(core), set(at))
 
 
+def prepare(name, address):
+    """Prepared tuple used by pair_features (normalized strings, sets, flags)."""
+    return _prep(name, address) + (bool(name) and not name.isascii(), address == "")
+
+
 def load_records(paths, ids=None):
     """Load records (optionally only the given entity ids) as {id: prepared tuple}."""
     ids = None if ids is None else set(ids)
@@ -50,7 +55,17 @@ def load_records(paths, ids=None):
                 ch = ch[ch["entity_id"].isin(ids)]
             for i, n, a in zip(ch["entity_id"].values, ch["business_name"].values,
                                ch["business_address"].values):
-                out[i] = _prep(n, a) + (bool(n) and not n.isascii(), a == "")
+                out[i] = prepare(n, a)
+    return out
+
+
+def load_raw(paths):
+    """{id: (name, address)} for all records - read once, prepare lazily per batch."""
+    out = {}
+    for p in paths:
+        for ch in read_tsv_chunks(p, 500_000):
+            out.update(zip(ch["entity_id"].values,
+                           zip(ch["business_name"].values, ch["business_address"].values)))
     return out
 
 
