@@ -1,5 +1,24 @@
-student_resource/dataset/
-**/.DS_Store
+# Datasets
+student_resource/
+
+# Python
 __pycache__/
-.venv/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
 venv/
+.venv/
+
+# Model/data artifacts
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# Generated cache / indexes
+data/cache/

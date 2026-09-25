@@ -1,0 +1,62 @@
+[     10s] indexed chunk 0 from train_source2.tsv: 250000 rows
+[     20s] indexed chunk 1 from train_source2.tsv: 250000 rows
+[     31s] indexed chunk 2 from train_source2.tsv: 250000 rows
+[     40s] indexed chunk 3 from train_source2.tsv: 250000 rows
+[     50s] indexed chunk 4 from train_source2.tsv: 250000 rows
+[     60s] indexed chunk 5 from train_source2.tsv: 250000 rows
+[     70s] indexed chunk 6 from train_source2.tsv: 250000 rows
+[     80s] indexed chunk 7 from train_source2.tsv: 250000 rows
+[     90s] indexed chunk 8 from train_source2.tsv: 250000 rows
+[    100s] indexed chunk 9 from train_source2.tsv: 250000 rows
+[    111s] indexed chunk 10 from train_source2.tsv: 250000 rows
+[    121s] indexed chunk 11 from train_source2.tsv: 250000 rows
+[    131s] indexed chunk 12 from train_source2.tsv: 250000 rows
+[    140s] indexed chunk 13 from train_source2.tsv: 250000 rows
+[    150s] indexed chunk 14 from train_source2.tsv: 250000 rows
+[    160s] indexed chunk 15 from train_source2.tsv: 250000 rows
+[    170s] indexed chunk 16 from train_source2.tsv: 250000 rows
+[    180s] indexed chunk 17 from train_source2.tsv: 250000 rows
+[    190s] indexed chunk 18 from train_source2.tsv: 250000 rows
+[    200s] indexed chunk 19 from train_source2.tsv: 250000 rows
+[    201s] indexed chunk 20 from train_source2.tsv: 34616 rows
+[    212s] indexed chunk 21 from train_source3.tsv: 250000 rows
+[    222s] indexed chunk 22 from train_source3.tsv: 250000 rows
+[    232s] indexed chunk 23 from train_source3.tsv: 250000 rows
+[    241s] indexed chunk 24 from train_source3.tsv: 250000 rows
+[    251s] indexed chunk 25 from train_source3.tsv: 250000 rows
+[    261s] indexed chunk 26 from train_source3.tsv: 250000 rows
+[    271s] indexed chunk 27 from train_source3.tsv: 250000 rows
+[    281s] indexed chunk 28 from train_source3.tsv: 250000 rows
+[    290s] indexed chunk 29 from train_source3.tsv: 250000 rows
+[    300s] indexed chunk 30 from train_source3.tsv: 250000 rows
+[    310s] indexed chunk 31 from train_source3.tsv: 250000 rows
+[    320s] indexed chunk 32 from train_source3.tsv: 250000 rows
+[    329s] indexed chunk 33 from train_source3.tsv: 250000 rows
+[    339s] indexed chunk 34 from train_source3.tsv: 250000 rows
+[    347s] indexed chunk 35 from train_source3.tsv: 250000 rows
+[    356s] indexed chunk 36 from train_source3.tsv: 250000 rows
+[    367s] indexed chunk 37 from train_source3.tsv: 250000 rows
+[    378s] indexed chunk 38 from train_source3.tsv: 250000 rows
+[    389s] indexed chunk 39 from train_source3.tsv: 250000 rows
+[    399s] indexed chunk 40 from train_source3.tsv: 250000 rows
+[    411s] indexed chunk 41 from train_source3.tsv: 250000 rows
+[    413s] indexed chunk 42 from train_source3.tsv: 35603 rows
+[    461s] country India: queries 0-3973 of 3973 done in 48s
+[    513s] country US: queries 0-6027 of 6027 done in 52s
+
+true pairs: 34567   queries: 10000
+recall@K  (candidates per S1 = K)
+  K=   5  recall=0.7790  pairs=50000
+  K=  10  recall=0.8691  pairs=99998
+  K=  20  recall=0.9055  pairs=199983
+  K=  30  recall=0.9203  pairs=299953
+  K=  50  recall=0.9320  pairs=499851
+  K=  75  recall=0.9397  pairs=749611
+  K= 100  recall=0.9435  pairs=999275
+  score>=0.3*best  recall=0.9236  pairs=388360
+  score>=0.4*best  recall=0.8860  pairs=191023
+  score>=0.5*best  recall=0.8266  pairs=103698
+  score>=0.6*best  recall=0.7473  pairs=61583
+recall by country @top_k: {'India': 0.9217, 'US': 0.9575}
+recall by source  @top_k: {'S2': 0.9445, 'S3': 0.9426}
+[    516s] done
