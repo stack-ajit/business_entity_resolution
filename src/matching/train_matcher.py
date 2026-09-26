@@ -26,10 +26,10 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from config import CACHE_DIR
-from matching.pair_features import CHEAP_FEATURES, FEATURES
+from matching.pair_features import CHEAP_FEATURES, FEATURES, S3_FEATURES, second_order_features
 from matching.selection import macro_f05, select, select_expected, tune, tune_expected
 
-MODEL_DIR = os.path.join(CACHE_DIR, "model_v3")
+MODEL_DIR = os.path.join(CACHE_DIR, "model_v4")
 T0 = time.time()
 
 
@@ -41,6 +41,20 @@ BASE = dict(objective="binary", feature_fraction=0.8, bagging_fraction=0.8, bagg
             lambda_l2=1.0, metric="binary_logloss", verbose=-1, num_threads=os.cpu_count())
 P1 = dict(BASE, learning_rate=0.1, num_leaves=63, min_data_in_leaf=200)
 P2 = dict(BASE, learning_rate=0.08, num_leaves=127, min_data_in_leaf=100)
+P3 = dict(BASE, learning_rate=0.05, num_leaves=63, min_data_in_leaf=100)
+
+
+def oof(df, feats, n_iter, k=3, seed=0):
+    """Out-of-fold stage-2 probabilities, folds split by S1 entity (no within-entity leakage)."""
+    ents = df["source1_entity_id"].unique()
+    fold_of = dict(zip(ents, np.random.default_rng(seed).integers(0, k, len(ents))))
+    fold = df["source1_entity_id"].map(fold_of).to_numpy()
+    out = np.zeros(len(df))
+    for i in range(k):
+        m = lgb.train(P2, lgb.Dataset(df.loc[fold != i, feats], df.loc[fold != i, "label"]),
+                      num_boost_round=n_iter)
+        out[fold == i] = m.predict(df.loc[fold == i, feats])
+    return out
 
 
 def fit(params, tr, va, feats):
@@ -56,9 +70,11 @@ def cands_per_entity(df, n_entities):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pairs", default=os.path.join(CACHE_DIR, "train_pairs_v3.parquet"))
+    ap.add_argument("--pairs", default=os.path.join(CACHE_DIR, "train_pairs_v4.parquet"))
     ap.add_argument("--stage1-recall", type=float, default=0.998,
                     help="share of true candidate pairs stage 1 must keep")
+    ap.add_argument("--stage3", choices=["auto", "on", "off"], default="auto",
+                    help="auto: use stage 3 only if it wins on validation")
     args = ap.parse_args()
     os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -94,43 +110,71 @@ def main():
 
     # ---------------- stage 2: full matcher ----------------
     m2 = fit(P2, tr2, va2, FEATURES)
-    va2["p"] = m2.predict(va2[FEATURES], num_iteration=m2.best_iteration)
-    log(f"stage 2: best iteration {m2.best_iteration}")
+    it2 = m2.best_iteration
+    va2["p2"] = m2.predict(va2[FEATURES], num_iteration=it2)
+    log(f"stage 2: best iteration {it2}")
+    imp = pd.Series(m2.feature_importance("gain"), index=FEATURES).sort_values(ascending=False)
+    print("stage-2 feature importance (gain, top 25):")
+    print((imp / imp.sum()).round(4).head(25).to_string())
 
-    score, params, table = tune(va2, ents_va)
-    log(f"validation macro F0.5 = {score:.4f} with {params} (one-to-one resolution on)")
-    print(table.sort_values("f05", ascending=False).head(8).to_string(index=False))
-    no121 = macro_f05(select(va2, params["threshold"], params["rel"], params["max_matches"], one_to_one=False), ents_va)
-    log(f"same rule without one-to-one resolution = {no121:.4f}")
-    e_score, e_params, e_table = tune_expected(va2, ents_va)
-    log(f"expected-F0.5 per-entity selection = {e_score:.4f} with {e_params}")
-    print(e_table.sort_values("f05", ascending=False).head(5).to_string(index=False))
-    mode = "expected" if e_score > score else "threshold"
-    params.update(e_params)
-    params["mode"] = mode
-    log(f"selection mode used at test time: {mode}")
+    # ---------------- stage 3: second-order (entity context + sibling consistency) ----------------
+    # trained on OUT-OF-FOLD stage-2 probabilities so it never sees leaked, over-confident p2
+    edges = pd.read_parquet(args.pairs.replace(".parquet", "_edges.parquet"))
+    tr2 = tr2.copy()
+    tr2["p2"] = oof(tr2, FEATURES, it2)
+    log("stage-2 out-of-fold probabilities done")
+    tr3, va3 = second_order_features(tr2, edges), second_order_features(va2, edges)
+    m3 = fit(P3, tr3, va3, FEATURES + S3_FEATURES)
+    it3 = m3.best_iteration
+    va3["p3"] = m3.predict(va3[FEATURES + S3_FEATURES], num_iteration=it3)
+    log(f"stage 3: best iteration {it3}")
+    imp3 = pd.Series(m3.feature_importance("gain"), index=FEATURES + S3_FEATURES).sort_values(ascending=False)
+    print("stage-3 feature importance (gain, top 12):")
+    print((imp3 / imp3.sum()).round(4).head(12).to_string())
+
+    # ---------------- selection: pick the best (stage, rule) on validation ----------------
+    results = {}
+    for stage, col in (("stage2", "p2"), ("stage3", "p3")):
+        vv = va3.assign(p=va3[col])
+        t_score, t_params, _ = tune(vv, ents_va)
+        e_score, e_params, _ = tune_expected(vv, ents_va)
+        no121 = macro_f05(select(vv, t_params["threshold"], t_params["rel"], t_params["max_matches"],
+                                 one_to_one=False), ents_va)
+        log(f"{stage}: threshold rule {t_score:.4f} {t_params} | expected-F0.5 {e_score:.4f} {e_params} "
+            f"| threshold rule w/o one-to-one {no121:.4f}")
+        results[stage] = (max(t_score, e_score), {**t_params, **e_params,
+                          "mode": "expected" if e_score > t_score else "threshold"})
+    best_stage = max(results, key=lambda k: results[k][0])
+    if args.stage3 != "auto":
+        best_stage = "stage3" if args.stage3 == "on" else "stage2"
+    score, params = results[best_stage]
+    log(f"validation macro F0.5 = {score:.4f} using {best_stage}, {params}")
     log(f"oracle F0.5, all candidates = {macro_f05(va[va['label'] == 1], ents_va):.4f}; "
         f"after stage 1 = {macro_f05(va2[va2['label'] == 1], ents_va):.4f}")
 
-    imp = pd.Series(m2.feature_importance("gain"), index=FEATURES).sort_values(ascending=False)
-    print("stage-2 feature importance (gain, top 25):\n" + (imp / imp.sum()).round(4).head(25).to_string())
-
     # ---------------- refit on all entities ----------------
-    log("refitting both stages on all entities")
+    log("refitting on all entities")
     f1 = lgb.train(P1, lgb.Dataset(pairs[CHEAP_FEATURES], pairs["label"]),
                    num_boost_round=int(m1.best_iteration * 1.1))
     keep = f1.predict(pairs[CHEAP_FEATURES]) >= t1
-    f2 = lgb.train(P2, lgb.Dataset(pairs.loc[keep, FEATURES], pairs.loc[keep, "label"]),
-                   num_boost_round=int(m2.best_iteration * 1.1))
+    surv = pairs[keep].copy()
+    f2 = lgb.train(P2, lgb.Dataset(surv[FEATURES], surv["label"]), num_boost_round=int(it2 * 1.1))
     f1.save_model(os.path.join(MODEL_DIR, "stage1.txt"))
     f2.save_model(os.path.join(MODEL_DIR, "stage2.txt"))
+    if best_stage == "stage3":
+        surv["p2"] = oof(surv, FEATURES, int(it2 * 1.1))
+        s3 = second_order_features(surv, edges)
+        f3 = lgb.train(P3, lgb.Dataset(s3[FEATURES + S3_FEATURES], s3["label"]),
+                       num_boost_round=int(it3 * 1.1))
+        f3.save_model(os.path.join(MODEL_DIR, "stage3.txt"))
     with open(os.path.join(MODEL_DIR, "selection.json"), "w") as f:
-        json.dump({**params, "stage1_threshold": t1, "stage1_recall": args.stage1_recall,
-                   "val_macro_f05": max(score, e_score), "val_threshold_rule": score, "val_expected_rule": e_score, "val_without_one_to_one": no121,
+        json.dump({**params, "use_stage3": best_stage == "stage3",
+                   "stage1_threshold": t1, "stage1_recall": args.stage1_recall,
+                   "val_macro_f05": score, "val_by_stage": {k: v[0] for k, v in results.items()},
                    "val_cands_per_s1": cands_per_entity(va2, n_va),
-                   "stage1_best_iteration": m1.best_iteration,
-                   "stage2_best_iteration": m2.best_iteration}, f, indent=2)
-    log("saved stage1/stage2 models + selection params")
+                   "stage1_best_iteration": m1.best_iteration, "stage2_best_iteration": it2,
+                   "stage3_best_iteration": it3}, f, indent=2)
+    log(f"saved models ({'stage1-3' if best_stage == 'stage3' else 'stage1-2'}) + selection params")
 
 
 if __name__ == "__main__":

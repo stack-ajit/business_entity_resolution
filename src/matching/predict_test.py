@@ -31,7 +31,7 @@ from config import ROOT, TEST_DIR, TEST_INDEX, TEST_S1_INDEX, TEST_REVERSE, CACH
 from blocking.tfidf_blocking import build_index, load_idf, query_index, read_tsv_chunks
 from blocking.reverse import build_reverse_table, build_s1_index, reverse_summary
 from matching.pair_features import (add_context_features, load_raw, pair_features, prepare,
-                                    sibling_expand, union_reverse_candidates)
+                                    second_order_features, sibling_expand, union_reverse_candidates)
 from matching.selection import select, select_expected
 
 T0 = time.time()
@@ -45,7 +45,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--batch", type=int, default=100_000)
-    ap.add_argument("--model-dir", default=os.path.join(CACHE_DIR, "model_v3"))
+    ap.add_argument("--model-dir", default=os.path.join(CACHE_DIR, "model_v4"))
     args = ap.parse_args()
 
     s1_path = os.path.join(TEST_DIR, "test_source1.tsv")
@@ -64,7 +64,10 @@ def main():
     # select columns by the names stored in each model, so code and model can't drift apart
     f1, f2 = m1.feature_name(), m2.feature_name()
     use_sib = "sib_n" in f1
-    log(f"selection rule: {sel}; sibling expansion: {use_sib}")
+    m3 = None
+    if sel.get("use_stage3"):
+        m3 = lgb.Booster(model_file=os.path.join(args.model_dir, "stage3.txt"))
+    log(f"selection rule: {sel}; sibling expansion: {use_sib}; stage 3: {m3 is not None}")
 
     idf = load_idf(TEST_INDEX)
     s1 = pd.concat(read_tsv_chunks(s1_path), ignore_index=True)
@@ -83,8 +86,9 @@ def main():
                             b["business_address"].values, b["country"].values, TEST_INDEX,
                             top_k=args.top_k, log=lambda m: None)
         cands = union_reverse_candidates(cands, rev, b["entity_id"].values)
+        edges = None
         if use_sib:
-            cands = sibling_expand(cands, rev, raw, TEST_INDEX)
+            cands, edges = sibling_expand(cands, rev, raw, TEST_INDEX)
         ctx = add_context_features(cands, rev, rev_sum)
         t.append(time.time())
         ctx = ctx[m1.predict(ctx[f1], num_threads=os.cpu_count()) >= sel["stage1_threshold"]]
@@ -101,9 +105,16 @@ def main():
                        for i in ctx["candidate_entity_id"].unique()}
             F = pair_features(ctx, s1_rec, s23_rec)
             t.append(time.time())
+            p = m2.predict(F[f2], num_threads=os.cpu_count())
+            if m3 is not None:
+                # stage 3: entity context + sibling consistency from stage-2 probabilities.
+                # All candidates of an S1 are in the same batch, so the context is complete.
+                F["p2"] = p
+                F = second_order_features(F, edges)
+                p = m3.predict(F[m3.feature_name()], num_threads=os.cpu_count())
             out = pd.DataFrame({"source1_entity_id": F["source1_entity_id"].values,
                                 "candidate_entity_id": F["candidate_entity_id"].values,
-                                "p": m2.predict(F[f2], num_threads=os.cpu_count()).astype(np.float32)})
+                                "p": p.astype(np.float32)})
             t.append(time.time())
         out.to_parquet(ckpt)
         steps = np.diff(t).round().astype(int).tolist()

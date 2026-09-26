@@ -47,9 +47,9 @@ def main():
         done=os.path.join(TRAIN_INDEX, "countries.json"))
     run("labelled training pairs", "src/matching/build_training_set.py",
         "--n-s1", args.n_s1, "--top-k", args.top_k,
-        done=os.path.join(CACHE_DIR, "train_pairs_v3.parquet"))
+        done=os.path.join(CACHE_DIR, "train_pairs_v4.parquet"))
     run("two-stage matcher", "src/matching/train_matcher.py", "--stage1-recall", args.stage1_recall,
-        done=os.path.join(CACHE_DIR, "model_v3", "stage2.txt"))
+        done=os.path.join(CACHE_DIR, "model_v4", "stage2.txt"))
     run("test inference", "src/matching/predict_test.py", "--top-k", args.top_k)
     print(f"outputs in {OUTPUT_DIR}")
 

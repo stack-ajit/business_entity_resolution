@@ -101,12 +101,24 @@ def _numbers(tokens):
     return tuple(out)
 
 
+# Pair-level address canonicalisation (blocking is unchanged, so no index rebuild). Covers
+# the abbreviations seen in the data incl. France, which is absent from training: making
+# French pairs look like the US/India pairs the model learned from is what transfer needs.
+# ("r"/"ch" would otherwise be dropped as too short, making true matches look incomplete.)
+ADDR_PAIR_CANON = {
+    **ADDR_CANON,
+    "r": "rue", "bd": "blvd", "blv": "blvd", "av": "ave", "imp": "impasse", "ch": "chemin",
+    "che": "chemin", "rte": "route", "fg": "faubourg", "fbg": "faubourg", "sq": "square",
+    "saint": "st", "sainte": "st", "all": "allee", "pl": "pl", "place": "pl", "qu": "quai",
+}
+
+
 def prepare(name, address, idf=None):
     """Prepared tuple used by pair_features (normalized strings, sets, flags, IDF weights,
     ordered address numbers, name initials)."""
     nt = normalize_tokens(name)
     core = [t for t in nt if t not in LEGAL]
-    at = normalize_tokens(address)
+    at = [ADDR_PAIR_CANON.get(t, t) for t in normalize_tokens(address)]
     nums = {t.lstrip("0") or "0" for t in at if t.isdigit()}
     nw, aw = _weights(nt, at, idf)
     initials = "".join(t[0] for t in core) if len(core) >= 2 else ""
@@ -228,6 +240,8 @@ def sibling_expand(cands, rev, raw, s23_index, n_anchor=5, top_n=5):
       - give every pair sib_n (how many of this S1's anchors list it as a neighbour) and
         sib_best (strongest such similarity), plus is_anchor.
     raw: {s23_id: (name, address, country)} for at least the anchors.
+    Returns (candidates, edges); edges = (source1_entity_id, anchor, candidate_entity_id,
+    nscore) links used by the stage-3 sibling-consistency features.
     """
     from blocking.tfidf_blocking import query_index
     c = cands.copy()
@@ -256,8 +270,8 @@ def sibling_expand(cands, rev, raw, s23_index, n_anchor=5, top_n=5):
     nb = nb[nb["source1_entity_id"] != nb["candidate_entity_id"]]  # drop self-match
     nb = nb.rename(columns={"source1_entity_id": "anchor", "candidate_entity_id": "candidate_entity_id",
                             "score": "nscore"})
-    sib = anc.rename(columns={"candidate_entity_id": "anchor"}).merge(nb, on="anchor")
-    sib = sib.groupby(["source1_entity_id", "candidate_entity_id"]).agg(
+    edges = anc.rename(columns={"candidate_entity_id": "anchor"}).merge(nb, on="anchor")
+    sib = edges.groupby(["source1_entity_id", "candidate_entity_id"]).agg(
         sib_n=("anchor", "nunique"), sib_best=("nscore", "max")).reset_index()
 
     c = c.merge(sib, on=["source1_entity_id", "candidate_entity_id"], how="outer")
@@ -266,7 +280,8 @@ def sibling_expand(cands, rev, raw, s23_index, n_anchor=5, top_n=5):
     c["sib_n"] = c["sib_n"].fillna(0).astype(np.float32)
     c["sib_best"] = c["sib_best"].fillna(0).astype(np.float32)
     c["score"] = c["score"].astype(np.float32)
-    return c.drop(columns=["_r", "_own"]).reset_index(drop=True)
+    edges = edges[["source1_entity_id", "anchor", "candidate_entity_id", "nscore"]].reset_index(drop=True)
+    return c.drop(columns=["_r", "_own"]).reset_index(drop=True), edges
 
 
 def add_context_features(cands, rev, rev_sum):
@@ -367,3 +382,40 @@ def pair_features(ctx, s1_rec, s23_rec, n_jobs=None, chunk=20_000):
     X = np.vstack(parts) if parts else np.empty((0, len(STRING_FEATURES)), np.float32)
     F = pd.DataFrame(X, columns=STRING_FEATURES, index=ctx.index)
     return pd.concat([ctx, F], axis=1)
+
+
+# ---------------- stage 3: second-order features from stage-2 probabilities ----------------
+S3_FEATURES = ["p2", "p2_rank", "p2_max", "p2_second", "p2_sum", "p2_n50", "p2_rel",
+               "sibp_max", "sibp_mean", "sibp_n"]
+
+
+def second_order_features(df, edges):
+    """
+    df: pairs with stage-2 probability column 'p2'. edges: sibling links from sibling_expand.
+    Entity context (rank / best / second / sum of p2 within the S1) and sibling consistency:
+    the stage-2 p of records linked to this candidate as near-duplicates for the same S1.
+    """
+    d = df.copy()
+    g = d.groupby("source1_entity_id")["p2"]
+    d["p2_rank"] = g.rank(ascending=False, method="first").astype(np.float32)
+    d["p2_max"] = g.transform("max").astype(np.float32)
+    d["p2_sum"] = g.transform("sum").astype(np.float32)
+    d["p2_n50"] = (d["p2"] >= 0.5).groupby(d["source1_entity_id"]).transform("sum").astype(np.float32)
+    second = d["p2"].where(d["p2_rank"] == 2).groupby(d["source1_entity_id"]).transform("max")
+    d["p2_second"] = second.fillna(0.0).astype(np.float32)
+    d["p2_rel"] = (d["p2"] / d["p2_max"].where(d["p2_max"] > 0)).fillna(0.0).astype(np.float32)
+
+    key = ["source1_entity_id", "candidate_entity_id"]
+    pp = d[key + ["p2"]]
+    # symmetric links x <-> y within the same S1 (anchor -> neighbour and back)
+    e = pd.concat([edges.rename(columns={"anchor": "x", "candidate_entity_id": "y"}),
+                   edges.rename(columns={"anchor": "y", "candidate_entity_id": "x"})],
+                  ignore_index=True)[["source1_entity_id", "x", "y"]].drop_duplicates()
+    e = e[e["x"] != e["y"]]
+    e = e.merge(pp.rename(columns={"candidate_entity_id": "x", "p2": "px"}), on=["source1_entity_id", "x"])
+    agg = e.groupby(["source1_entity_id", "y"])["px"].agg(["max", "mean", "size"]).reset_index()
+    agg.columns = ["source1_entity_id", "candidate_entity_id", "sibp_max", "sibp_mean", "sibp_n"]
+    d = d.merge(agg, on=key, how="left")
+    for c in ("sibp_max", "sibp_mean", "sibp_n"):
+        d[c] = d[c].fillna(0.0).astype(np.float32)
+    return d

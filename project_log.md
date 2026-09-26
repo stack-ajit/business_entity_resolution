@@ -478,3 +478,20 @@ Expected-F0.5 selection ties here (0.9820 vs 0.9823) because probabilities are n
 **Reading:** both new ideas are used (the sibling anchor structure and the generator-aware number features). The expected-F0.5 rule and one-to-one resolution each add only ~+0.0002 on validation; one-to-one should matter more on test, where all S1 compete. Expected LB ≈ 0.952–0.956 if the val→LB gap stays ~1.2 pts.
 
 **Remaining gap to 0.98:** the classifier (0.9649 vs oracle 0.9835, −1.9 pts) and the val→LB gap (~1.2 pts, probably France and test composition).
+
+## 12. v4 (built while v3 test inference runs): France-aware address canonicalisation + stage-3 context model
+### France: what its noise looks like (test S1 vs v2 matches)
+- **Street-type abbreviations** not covered before: Rue↔R./R, Boulevard↔BD/BLVD, Avenue↔AV, Impasse↔Imp., Chemin↔Ch, Saint↔St (Saint-Nazaire/ST-NAZAIRE). "R"/"Ch" were even *dropped* as too short, so true matches looked like they were missing words.
+- **The same decoy types as US/India**, some of which v2 matched: number nudge ("Collège Pierre SCI | **23** R. Margaux" for "**19** Rue Margaux"); word swap ("Syndicat **Maison** SARL" for "Syndicat Sante SARL", "Organisme (France) **Lycee**" for "… Amis").
+
+**Fix:** `ADDR_PAIR_CANON` canonicalises address tokens **inside pair features only** (r→rue, bd/blv→blvd, av→ave, imp→impasse, ch/che→chemin, saint/sainte→st, rte→route, fg/fbg→faubourg, …). Blocking and indexes are unchanged, so no rebuild is needed. France is absent from training, so making French pairs look like the US/India pairs the model learned from is what transfer needs. Saint→St also helps US.
+
+### Stage 3: second-order context model (auto-selected)
+Stage 2 scores each pair in isolation. Stage 3 adds, from stage-2 probabilities:
+- **Entity context:** `p2`, rank within S1, S1's best / second / sum of p2, count ≥ 0.5, `p2_rel`.
+- **Sibling consistency:** max / mean / count of p2 over records linked to this candidate as near-duplicates for the same S1 (the anchor↔neighbour edges now returned by `sibling_expand` and saved as `train_pairs_v4_edges.parquet`).
+- Trained on **out-of-fold** stage-2 probabilities (3 folds by S1 entity) to avoid leakage and over-confidence.
+- `train_matcher` evaluates both stage 2 and stage 3 × both selection rules on validation and **uses stage 3 only if it wins** (`--stage3 auto|on|off`). `predict_test` applies it per batch; all of an S1's candidates are in one batch, so the context is complete.
+
+**Sample world:** stage 3 = 0.9822 vs stage 2 = 0.9827, so auto picked stage 2. The world is small (5K S1) and probabilities are very confident; full scale has 30× more data. The forced-stage-3 path is tested end-to-end (validator PASS). France canonicalisation: misses 491→480, false merges unchanged (78).
+Artifacts are versioned `train_pairs_v4*`, `model_v4`, `test_batches_model_v4_*`.

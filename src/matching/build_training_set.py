@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--drop-s1-frac", type=float, default=0.18,
                     help="share of train S1 removed from the world to match test's distractor rate")
     ap.add_argument("--block", type=int, default=20_000, help="S1 entities per feature block (memory)")
-    ap.add_argument("--out", default=os.path.join(CACHE, "train_pairs_v3.parquet"))
+    ap.add_argument("--out", default=os.path.join(CACHE, "train_pairs_v4.parquet"))
     args = ap.parse_args()
 
     s1_path = os.path.join(TRAIN, "train_source1.tsv")
@@ -74,7 +74,7 @@ def main():
     log(f"{n_fwd} forward pairs + {len(cands) - n_fwd} reverse-only pairs")
     s23_raw = load_raw(s23_paths)  # raw strings of all S2/S3 (anchors + expansion + features)
     n_before = len(cands)
-    cands = sibling_expand(cands, rev, s23_raw, TRAIN_INDEX)
+    cands, edges = sibling_expand(cands, rev, s23_raw, TRAIN_INDEX)
     log(f"sibling expansion: +{len(cands) - n_before} sibling-only pairs")
     ctx = add_context_features(cands, rev, rev_sum)
     del rev, rev_sum
@@ -106,6 +106,7 @@ def main():
     F["label"] = [int((a, b) in truth) for a, b in zip(F["source1_entity_id"], F["candidate_entity_id"])]
     F["n_true_total"] = F["source1_entity_id"].map(n_true).fillna(0).astype(int)
     F.to_parquet(args.out)
+    edges.to_parquet(args.out.replace(".parquet", "_edges.parquet"))
     # entities with no candidates at all still count in macro F0.5 - keep the list
     s1[["entity_id"]].merge(n_true.rename("n_true_total"), left_on="entity_id",
                             right_index=True, how="left").fillna(0).to_parquet(
