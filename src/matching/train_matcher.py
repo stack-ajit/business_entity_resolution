@@ -29,7 +29,7 @@ from config import CACHE_DIR
 from matching.pair_features import CHEAP_FEATURES, FEATURES
 from matching.selection import macro_f05, select, tune
 
-MODEL_DIR = os.path.join(CACHE_DIR, "model_v2")
+MODEL_DIR = os.path.join(CACHE_DIR, "model_v3")
 T0 = time.time()
 
 
@@ -56,7 +56,7 @@ def cands_per_entity(df, n_entities):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pairs", default=os.path.join(CACHE_DIR, "train_pairs_v2.parquet"))
+    ap.add_argument("--pairs", default=os.path.join(CACHE_DIR, "train_pairs_v3.parquet"))
     ap.add_argument("--stage1-recall", type=float, default=0.998,
                     help="share of true candidate pairs stage 1 must keep")
     args = ap.parse_args()

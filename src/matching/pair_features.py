@@ -127,7 +127,7 @@ def _wsim(wa, wb):
 CHEAP_FEATURES = [
     "score", "rank", "score_rel", "score_gap_best", "fwd",
     "rscore", "rev_rank", "rev_score_rel", "rev_gap", "rev_margin", "rev_is_best", "rev_best",
-    "a_n_revbest",
+    "a_n_revbest", "is_anchor", "sib_n", "sib_best",
 ]
 STRING_FEATURES = [
     "name_ratio", "name_tset", "name_tsort", "name_partial", "name_jw",
@@ -157,6 +157,58 @@ def union_reverse_candidates(cands, rev, s1_ids):
                           "score": np.float32(0.0), "fwd": 0})
     c = pd.concat([c, extra], ignore_index=True)
     return c.drop_duplicates(["source1_entity_id", "candidate_entity_id"], keep="first").reset_index(drop=True)
+
+
+def sibling_expand(cands, rev, raw, s23_index, n_anchor=5, top_n=5):
+    """
+    Sibling expansion: an entity's true matches are noisy copies of the same business, so
+    they resemble each other. For each S1, take up to n_anchor "anchor" candidates (forward
+    top-3 plus candidates whose own best S1 is this one), look up each anchor's top_n most
+    similar S2/S3 records, and
+      - add those neighbours as new candidates (recovers matches retrieval ranked too low;
+        measured on the sample: 55% of blocking misses are a found sibling's top-5 neighbour)
+      - give every pair sib_n (how many of this S1's anchors list it as a neighbour) and
+        sib_best (strongest such similarity), plus is_anchor.
+    raw: {s23_id: (name, address, country)} for at least the anchors.
+    """
+    from blocking.tfidf_blocking import query_index
+    c = cands.copy()
+    if "fwd" not in c:
+        c["fwd"] = 1
+    c["_r"] = c.groupby("source1_entity_id")["score"].rank(ascending=False, method="first")
+    c["_a"] = id_code(c["source1_entity_id"].values)
+    c["_b"] = id_code(c["candidate_entity_id"].values)
+    top1 = rev.loc[(rev["rrank"] == 1) & rev["b"].isin(c["_b"].unique()), ["b", "s1"]]
+    c = c.merge(top1.rename(columns={"b": "_b", "s1": "_a"}).assign(_own=True), on=["_b", "_a"], how="left")
+    c["_own"] = c["_own"].fillna(False).astype(bool)
+    c = c.drop(columns=["_a", "_b"])
+    anc = c[(c["_r"] <= 3) | c["_own"]].sort_values(["source1_entity_id", "_own", "score"],
+                                                     ascending=[True, False, False])
+    anc = anc[anc.groupby("source1_entity_id").cumcount() < n_anchor][["source1_entity_id", "candidate_entity_id"]]
+    c["is_anchor"] = 0.0
+    c.loc[c.set_index(["source1_entity_id", "candidate_entity_id"]).index.isin(
+        anc.set_index(["source1_entity_id", "candidate_entity_id"]).index), "is_anchor"] = 1.0
+
+    a_ids = anc["candidate_entity_id"].unique()
+    recs = [raw[i] for i in a_ids]
+    nb = query_index(a_ids, np.array([r[0] for r in recs], dtype=object),
+                     np.array([r[1] for r in recs], dtype=object),
+                     np.array([r[2] for r in recs], dtype=object), s23_index,
+                     top_k=top_n + 1, log=lambda m: None)
+    nb = nb[nb["source1_entity_id"] != nb["candidate_entity_id"]]  # drop self-match
+    nb = nb.rename(columns={"source1_entity_id": "anchor", "candidate_entity_id": "candidate_entity_id",
+                            "score": "nscore"})
+    sib = anc.rename(columns={"candidate_entity_id": "anchor"}).merge(nb, on="anchor")
+    sib = sib.groupby(["source1_entity_id", "candidate_entity_id"]).agg(
+        sib_n=("anchor", "nunique"), sib_best=("nscore", "max")).reset_index()
+
+    c = c.merge(sib, on=["source1_entity_id", "candidate_entity_id"], how="outer")
+    new = c["score"].isna()
+    c.loc[new, ["score", "fwd", "is_anchor"]] = 0.0
+    c["sib_n"] = c["sib_n"].fillna(0).astype(np.float32)
+    c["sib_best"] = c["sib_best"].fillna(0).astype(np.float32)
+    c["score"] = c["score"].astype(np.float32)
+    return c.drop(columns=["_r", "_own"]).reset_index(drop=True)
 
 
 def add_context_features(cands, rev, rev_sum):

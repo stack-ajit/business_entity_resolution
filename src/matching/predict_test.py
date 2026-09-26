@@ -30,8 +30,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from config import ROOT, TEST_DIR, TEST_INDEX, TEST_S1_INDEX, TEST_REVERSE, CACHE_DIR, OUTPUT_DIR
 from blocking.tfidf_blocking import build_index, load_idf, query_index, read_tsv_chunks
 from blocking.reverse import build_reverse_table, build_s1_index, reverse_summary
-from matching.pair_features import (CHEAP_FEATURES, FEATURES, add_context_features, load_raw,
-                                    pair_features, prepare, union_reverse_candidates)
+from matching.pair_features import (add_context_features, load_raw, pair_features, prepare,
+                                    sibling_expand, union_reverse_candidates)
 from matching.selection import select
 
 T0 = time.time()
@@ -45,7 +45,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--batch", type=int, default=100_000)
-    ap.add_argument("--model-dir", default=os.path.join(CACHE_DIR, "model_v2"))
+    ap.add_argument("--model-dir", default=os.path.join(CACHE_DIR, "model_v3"))
     args = ap.parse_args()
 
     s1_path = os.path.join(TEST_DIR, "test_source1.tsv")
@@ -61,14 +61,17 @@ def main():
     m2 = lgb.Booster(model_file=os.path.join(args.model_dir, "stage2.txt"))
     with open(os.path.join(args.model_dir, "selection.json")) as f:
         sel = json.load(f)
-    log(f"selection rule: {sel}")
+    # select columns by the names stored in each model, so code and model can't drift apart
+    f1, f2 = m1.feature_name(), m2.feature_name()
+    use_sib = "sib_n" in f1
+    log(f"selection rule: {sel}; sibling expansion: {use_sib}")
 
     idf = load_idf(TEST_INDEX)
     s1 = pd.concat(read_tsv_chunks(s1_path), ignore_index=True)
     raw = load_raw(s23_paths)
     log(f"{len(s1)} test S1 entities, {len(raw)} S2/S3 records")
 
-    ckpt_dir = os.path.join(CACHE_DIR, f"test_batches_v2_k{args.top_k}_b{args.batch}")
+    ckpt_dir = os.path.join(CACHE_DIR, f"test_batches_{os.path.basename(args.model_dir)}_k{args.top_k}_b{args.batch}")
     os.makedirs(ckpt_dir, exist_ok=True)
     for b0 in range(0, len(s1), args.batch):
         ckpt = os.path.join(ckpt_dir, f"batch_{b0:08d}.parquet")
@@ -80,9 +83,11 @@ def main():
                             b["business_address"].values, b["country"].values, TEST_INDEX,
                             top_k=args.top_k, log=lambda m: None)
         cands = union_reverse_candidates(cands, rev, b["entity_id"].values)
+        if use_sib:
+            cands = sibling_expand(cands, rev, raw, TEST_INDEX)
         ctx = add_context_features(cands, rev, rev_sum)
         t.append(time.time())
-        ctx = ctx[m1.predict(ctx[CHEAP_FEATURES], num_threads=os.cpu_count()) >= sel["stage1_threshold"]]
+        ctx = ctx[m1.predict(ctx[f1], num_threads=os.cpu_count()) >= sel["stage1_threshold"]]
         ctx = ctx.reset_index(drop=True)
         t.append(time.time())
         out = pd.DataFrame({"source1_entity_id": pd.Series(dtype=object),
@@ -98,7 +103,7 @@ def main():
             t.append(time.time())
             out = pd.DataFrame({"source1_entity_id": F["source1_entity_id"].values,
                                 "candidate_entity_id": F["candidate_entity_id"].values,
-                                "p": m2.predict(F[FEATURES], num_threads=os.cpu_count()).astype(np.float32)})
+                                "p": m2.predict(F[f2], num_threads=os.cpu_count()).astype(np.float32)})
             t.append(time.time())
         out.to_parquet(ckpt)
         steps = np.diff(t).round().astype(int).tolist()

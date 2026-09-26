@@ -379,3 +379,24 @@ The reverse direction recovers ~1 point of recall for +11.6% pairs, and stage 1 
 - **One-to-one resolution on validation: +0.00003** (0.95859 vs 0.95855). Validation contains only 30K of 1.8M S1, so conflicts are rare there. On test, all 1.73M S1 compete (v1 had 81,556 conflicting pairs), so the LB effect should be larger than validation shows.
 - **Remaining gap to 0.99:** blocking/pruning ceiling 0.981 (−1.9 pts) and classifier 0.9586 vs 0.981 (−2.2 pts). The next levers are sibling expansion (blocking) and better features for the classifier.
 - Timing: stage 1 ~3 min, stage 2 ~5 min, refit ~10 min (20 min total).
+
+## 10. v3: Sibling Expansion (built while v2 test inference runs)
+**Why:** the v2 gap to the 0.99 teams splits into blocking/pruning (oracle 0.981) and classifier (0.9586). Every entity's matches are noisy copies of one business, so they resemble each other. On the sample, 55% of blocking misses were a *found* sibling's top-5 neighbour.
+
+**What (`pair_features.sibling_expand`):**
+- **Anchors per S1** (max 5): forward top-3, plus candidates whose own best S1 is this entity (the strongest v2 signal). The anchor check is a vectorised int-code merge with the reverse table, not a Python set of 10M tuples.
+- **Expansion:** each anchor is queried against the S2/S3 index (top-5 neighbours, self excluded). Neighbours not already candidates are added (`fwd=0`, `rscore=0`).
+- **New cheap features for every pair:** `is_anchor`, `sib_n` (number of this S1's anchors listing the record as a neighbour), and `sib_best` (strongest such similarity). A record resembling two confident matches is almost surely the same entity, which also helps the classifier.
+- **Safety:** `predict_test` now selects columns by the feature names stored inside each LightGBM model (`booster.feature_name()`), and enables expansion only if the model was trained with it. Code and model can't silently drift. Artifacts are versioned (`train_pairs_v3`, `model_v3`, `test_batches_model_v3_*`); v2 artifacts stay intact.
+
+**Sample world (test-like decoys), same settings as v2:**
+
+| | v2 | **v3** |
+|---|---|---|
+| Blocking recall | 97.96% | **98.59%** (+21.8K sibling-only pairs; 31% of misses recovered) |
+| Oracle F0.5 after stage 1 | 0.9891 | **0.9926** |
+| Validation macro F0.5 | 0.9788 | **0.9809** |
+| Candidates per S1 (99.8% kept) | 21.4 | **20.1** |
+| Test path | — | 18.9 candidates/S1, 3.39 matches/S1 (truth 3.46), validator PASS |
+
+**Cost at full scale:** ~4 anchor queries per S1 against the 10M-record index → estimated +2–3 min per 100K-S1 batch (~+45 min for test) and ~+5 min for the training set.

@@ -25,7 +25,7 @@ from config import TRAIN_DIR as TRAIN, CACHE_DIR as CACHE, TRAIN_INDEX, TRAIN_S1
 from blocking.tfidf_blocking import load_idf, query_index, read_tsv_chunks
 from blocking.reverse import build_reverse_table, build_s1_index, reverse_summary
 from matching.pair_features import (add_context_features, load_raw, pair_features, prepare,
-                                    union_reverse_candidates)
+                                    sibling_expand, union_reverse_candidates)
 
 T0 = time.time()
 
@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--drop-s1-frac", type=float, default=0.18,
                     help="share of train S1 removed from the world to match test's distractor rate")
     ap.add_argument("--block", type=int, default=20_000, help="S1 entities per feature block (memory)")
-    ap.add_argument("--out", default=os.path.join(CACHE, "train_pairs_v2.parquet"))
+    ap.add_argument("--out", default=os.path.join(CACHE, "train_pairs_v3.parquet"))
     args = ap.parse_args()
 
     s1_path = os.path.join(TRAIN, "train_source1.tsv")
@@ -72,6 +72,10 @@ def main():
     n_fwd = len(cands)
     cands = union_reverse_candidates(cands, rev, s1["entity_id"].values)
     log(f"{n_fwd} forward pairs + {len(cands) - n_fwd} reverse-only pairs")
+    s23_raw = load_raw(s23_paths)  # raw strings of all S2/S3 (anchors + expansion + features)
+    n_before = len(cands)
+    cands = sibling_expand(cands, rev, s23_raw, TRAIN_INDEX)
+    log(f"sibling expansion: +{len(cands) - n_before} sibling-only pairs")
     ctx = add_context_features(cands, rev, rev_sum)
     del rev, rev_sum
 
@@ -87,8 +91,7 @@ def main():
     # score in blocks of S1 entities, discarding each block's prepared records afterwards.
     idf = load_idf(TRAIN_INDEX)
     s1_raw = load_raw([s1_path], s1["entity_id"])
-    s23_raw = load_raw(s23_paths, ctx["candidate_entity_id"].unique())
-    log(f"raw records loaded ({len(s23_raw)} candidates), computing features in blocks")
+    log(f"computing features in blocks for {len(ctx)} pairs")
     ids = s1["entity_id"].values
     parts = []
     for i in range(0, len(ids), args.block):
@@ -108,8 +111,10 @@ def main():
                             right_index=True, how="left").fillna(0).to_parquet(
         args.out.replace(".parquet", "_entities.parquet"))
     pos = F["label"] == 1
+    sib_only = (F["fwd"] == 0) & (F["rscore"] == 0)
     log(f"saved {len(F)} pairs, positives={pos.sum()}: blocking recall forward-only "
-        f"{(pos & (F['fwd'] == 1)).sum() / len(truth):.4f}, with reverse {pos.sum() / len(truth):.4f}")
+        f"{(pos & (F['fwd'] == 1)).sum() / len(truth):.4f}, + reverse "
+        f"{(pos & ~sib_only).sum() / len(truth):.4f}, + siblings {pos.sum() / len(truth):.4f}")
 
 
 if __name__ == "__main__":
