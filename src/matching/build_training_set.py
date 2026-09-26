@@ -39,18 +39,30 @@ def main():
     ap.add_argument("--n-s1", type=int, default=150_000)
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--drop-s1-frac", type=float, default=0.18,
+                    help="share of train S1 removed from the world to match test's distractor rate")
     ap.add_argument("--out", default=os.path.join(CACHE, "train_pairs_v2.parquet"))
     args = ap.parse_args()
 
     s1_path = os.path.join(TRAIN, "train_source1.tsv")
     s23_paths = [os.path.join(TRAIN, f"train_source{i}.tsv") for i in (2, 3)]
-    build_s1_index(s1_path, TRAIN_S1_INDEX, log=log)
+
+    # Make the train world look like test: test has ~2.3 distractor S2/S3 records per S1
+    # vs ~1.2 in train. Removing a fraction of S1 entities entirely turns their matched
+    # records into distractors that belong to nobody (exactly the test situation).
+    s1_all = pd.concat(read_tsv_chunks(s1_path), ignore_index=True)
+    s1_all = s1_all.sample(frac=1 - args.drop_s1_frac, random_state=args.seed + 1)
+    kept_path = os.path.join(CACHE, "train_source1_kept.tsv")
+    if not os.path.exists(kept_path):
+        s1_all.to_csv(kept_path, sep="\t", index=False)
+    log(f"S1 world: kept {len(s1_all)} entities (dropped {args.drop_s1_frac:.0%} -> their matches become distractors)")
+    build_s1_index(kept_path, TRAIN_S1_INDEX, log=log)
     rev = build_reverse_table(s23_paths, TRAIN_S1_INDEX, TRAIN_REVERSE, log=log)
     rev_sum = reverse_summary(rev)
     log(f"reverse table: {len(rev)} rows for {len(rev_sum)} S2/S3 records")
 
-    s1 = pd.concat(read_tsv_chunks(s1_path), ignore_index=True)
-    s1 = s1.sample(n=args.n_s1, random_state=args.seed).reset_index(drop=True)
+    s1 = s1_all.sample(n=args.n_s1, random_state=args.seed).reset_index(drop=True)
+    del s1_all
     log(f"sampled {len(s1)} S1 entities")
 
     cands = query_index(s1["entity_id"].values, s1["business_name"].values,

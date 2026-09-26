@@ -325,3 +325,12 @@ Account `stackajit02`, code `d7ae31f` (memory-safe parallel features).
 | Validator | PASS | PASS |
 
 The reverse score `rscore` immediately became the #2 feature (19% of gain).
+
+### v2 addition: make the training world as hard as the test world
+**Found in `candidate_pairs.tsv` / file sizes:**
+- Test has **~2.3 distractor S2/S3 records per S1** (9.97M S2/S3 / 1.73M S1 = 5.75 records per S1, 3.46 of them true) vs **~1.2 in train** (10.32M / 2.21M = 4.68 per S1). The same model and threshold face twice as many decoys on the leaderboard, which explains most of the gap between validation 0.9425 and LB 0.925.
+- v1 candidate lists were a fixed ~50 per S1 in every country. **514,589 test S2/S3 records (5.2%) never appeared in any list**, so they could never be matched. v2's reverse candidates give every record its top-3 S1.
+
+**Fix (`build_training_set.py --drop-s1-frac 0.18`):** remove 18% of train S1 entities from the world entirely (from the S1 index, training sample and ground truth). Their ~1.4M matched records stay in S2/S3 as distractors that belong to nobody, exactly like test. (2.68M + 0.18·7.64M) / (0.82·2.21M) ≈ 2.25 distractors per S1, matching test. Reverse features, stage-1 threshold, selection threshold and one-to-one tuning are all now learned under test-like conditions.
+
+**Smoke test (sample world):** the selection threshold tuned itself up **from 0.20 to 0.40**, which is the correction v1 needed on the LB. Stage 1 now needs 21 candidates per S1 for 99.8% of true pairs (vs 14 in the easier world); keeping 99.5% needs 12.8, and 99.0% needs 8.9. Held-out F0.5 0.9788, oracle after stage 1 0.9891.
