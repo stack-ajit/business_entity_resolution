@@ -352,3 +352,15 @@ Idea: an entity's matches are noisy copies of one business, so they resemble eac
 - Pool uses `spawn`: workers start clean and receive only their 20K-pair chunk.
 - The training-set builder keeps only raw strings (`load_raw(ids=…)`) and prepares + scores records in blocks of 20K S1 entities (`--block`), discarding each block's prepared records.
 - **Verified identical output** to the unblocked version on the sample world: same 232,363 pairs and labels, max feature difference 0.0.
+
+### Kaggle run #4 (v2), stage 2 result: reverse candidates help at full scale
+Training pairs built in the test-like world (1,809,593 kept train S1; 18% dropped). The UI output froze at 0% CPU, but the process had finished; the parquet was verified complete.
+
+| | Value |
+|---|---|
+| Pairs | 8,372,755 (7,499,036 forward + 873,719 reverse-only), all 150,000 S1 have candidates |
+| True pairs reachable | 493,707 of 519,878 |
+| **Blocking recall, forward top-50 only** | 93.99% |
+| **Blocking recall, forward ∪ reverse top-3** | **94.97% (+0.98 pt)** |
+
+The reverse direction recovers ~1 point of recall for +11.6% pairs, and stage 1 prunes those anyway.
