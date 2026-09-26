@@ -334,3 +334,9 @@ The reverse score `rscore` immediately became the #2 feature (19% of gain).
 **Fix (`build_training_set.py --drop-s1-frac 0.18`):** remove 18% of train S1 entities from the world entirely (from the S1 index, training sample and ground truth). Their ~1.4M matched records stay in S2/S3 as distractors that belong to nobody, exactly like test. (2.68M + 0.18·7.64M) / (0.82·2.21M) ≈ 2.25 distractors per S1, matching test. Reverse features, stage-1 threshold, selection threshold and one-to-one tuning are all now learned under test-like conditions.
 
 **Smoke test (sample world):** the selection threshold tuned itself up **from 0.20 to 0.40**, which is the correction v1 needed on the LB. Stage 1 now needs 21 candidates per S1 for 99.8% of true pairs (vs 14 in the easier world); keeping 99.5% needs 12.8, and 99.0% needs 8.9. Held-out F0.5 0.9788, oracle after stage 1 0.9891.
+
+### `run_pipeline.py`: one-command reproduction (was an empty 0-byte file since the first commit)
+It runs every stage in order (train index → training pairs → two-stage matcher → test inference → validator) and skips stages whose outputs exist. `--eval-blocking` adds the full-train recall report. Paths come from `ER_DATA_DIR` / `ER_WORK_DIR`. It is required for the final package ("anyone should be able to regenerate both output files"). Verified on the sample world: skips finished stages, runs inference, validator PASS.
+
+### v3 prototype signal: sibling expansion
+Idea: an entity's matches are noisy copies of one business, so they resemble each other. Measured on the sample: for the 1,914 true pairs blocking missed, searching the top-k S2/S3 neighbours of the *found* siblings recovers **41.1% (k=3), 55.5% (k=5), 64.5% (k=10)** of them. The sample corpus is small (134K), so full scale will be lower, but blocking misses ~6% of true pairs, so this is the most promising route to the ceiling the 0.99 teams reach.
