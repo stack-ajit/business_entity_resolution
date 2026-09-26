@@ -400,3 +400,16 @@ The reverse direction recovers ~1 point of recall for +11.6% pairs, and stage 1 
 | Test path | — | 18.9 candidates/S1, 3.39 matches/S1 (truth 3.46), validator PASS |
 
 **Cost at full scale:** ~4 anchor queries per S1 against the 10M-record index → estimated +2–3 min per 100K-S1 batch (~+45 min for test) and ~+5 min for the training set.
+
+### Kaggle run #4 (v2), stage 4: test prediction complete (validator PASS)
+| | v1 | **v2** | truth (train) |
+|---|---|---|---|
+| Candidates per S1 (`candidate_pairs.tsv`) | 50 | **21.77** (101 empty) | — |
+| Matches per S1 | ~3.08 | 3.15 | 3.46 |
+| Predicted singletons | 6.32% | 6.57% (113,840) | 5.6% |
+| One-to-one conflicts removed | 0 (81,556 wrong pairs left in) | 5,485,293 → 5,455,561 (**29,732 removed**) | — |
+| Files | cand 1.14 GB / match 91 MB | **cand 508 MB** / match 93 MB | — |
+
+- Test reverse table: 29,845,987 rows. The run resumed from checkpoints (batches 0–900K were saved by an earlier attempt), which confirms the checkpoint design works.
+- **Per-batch time ~395 s**: retrieve + context ~68, stage 1 ~60, string features ~165, stage 2 ~105. Total 3,613 s.
+- Slightly conservative (fewer matches, more singletons than truth) because the tuned threshold is 0.70; this is the right direction under F0.5.
