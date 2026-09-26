@@ -364,3 +364,18 @@ Training pairs built in the test-like world (1,809,593 kept train S1; 18% droppe
 | **Blocking recall, forward ∪ reverse top-3** | **94.97% (+0.98 pt)** |
 
 The reverse direction recovers ~1 point of recall for +11.6% pairs, and stage 1 prunes those anyway.
+
+### Kaggle run #4 (v2), stage 3 result: validation 0.9586 in the test-like world
+| | v1 | **v2** |
+|---|---|---|
+| Validation macro F0.5 | 0.9425 (easy world, 1.2 distractors/S1) | **0.9586** (test-like world, ~2.3 distractors/S1) |
+| Oracle F0.5 (perfect classifier on candidates) | 0.977 | 0.9817 all candidates / **0.9810 after stage 1** |
+| Candidates per S1 | 50 | **24.05** |
+| Selection | thr 0.65, rel 0.7 | thr 0.70, rel 0.5 (top rules within 0.0003) |
+
+- **Stage 1** (361 trees): keep 99.0% of true pairs → 13.1 per S1; 99.5% → 18.2; **99.8% → 24.1 (used)**; 99.9% → 27.0. The 99.8% setting costs only 0.0007 of oracle F0.5.
+- **Stage 2** (927 trees, lr 0.08; val log-loss 0.0195 on survivors).
+- **Feature importance: the one-to-one signal dominates.** `rev_rank` 28.4%, `rscore` 22.3%, `num_jacc` 7.7%, `rev_score_rel` 5.4%, `num_conflict` 4.0%, `rev_is_best` 3.7%, … In v1, forward `score`/`rank` held ~60%; now `rank` is down to 0.7%. The model is using "which S1 does this candidate itself point to".
+- **One-to-one resolution on validation: +0.00003** (0.95859 vs 0.95855). Validation contains only 30K of 1.8M S1, so conflicts are rare there. On test, all 1.73M S1 compete (v1 had 81,556 conflicting pairs), so the LB effect should be larger than validation shows.
+- **Remaining gap to 0.99:** blocking/pruning ceiling 0.981 (−1.9 pts) and classifier 0.9586 vs 0.981 (−2.2 pts). The next levers are sibling expansion (blocking) and better features for the classifier.
+- Timing: stage 1 ~3 min, stage 2 ~5 min, refit ~10 min (20 min total).
