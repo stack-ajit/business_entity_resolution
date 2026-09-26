@@ -454,3 +454,12 @@ The v2 feature `num_conflict` misses the key case: "1216 vs 1407 Dalamal Tower, 
 | False merges / misses | 92 / 495 | **78 / 491** |
 
 Expected-F0.5 selection ties here (0.9820 vs 0.9823) because probabilities are near 0/1 in the easy world. It is kept on auto-select for the harder real data.
+
+### Kaggle run #5 (v3, code `e760509`), stage 2: sibling expansion works at full scale
+| Blocking recall (test-like world, 150K train S1) | |
+|---|---|
+| forward top-50 | 93.99% |
+| + reverse top-3 | 94.97% |
+| **+ sibling neighbours** | **95.88%** (+0.91 pt) |
+
+8,770,608 pairs (+397,853 sibling-only), 498,450 positives. Siblings recover ~18% of the matches that forward+reverse still missed. Stage 2 took 1,296 s (sibling queries ~5 min, features ~13 min in 20K-entity blocks). A pandas FutureWarning about `fillna(False)` downcasting is harmless.
