@@ -22,3 +22,5 @@ venv/
 
 # Generated cache / indexes
 data/cache/
+# Downloaded Kaggle outputs (large)
+data/kaggle_output/

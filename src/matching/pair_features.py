@@ -2,26 +2,37 @@
 Pair features for the matching model: given candidate pairs (S1 record, S2/S3 record)
 from blocking, describe how similar the two records are.
 
+Two feature tiers (two-stage model):
+- CHEAP_FEATURES: retrieval context only (forward score/rank + reverse "which S1 does this
+  candidate itself point to"). Vectorised, no string work -> used by the stage-1 pruner
+  that shrinks the candidate set.
+- FEATURES: cheap + string similarities + IDF-weighted token overlaps -> stage-2 matcher,
+  computed only for the pairs that survive stage 1.
+
 Design notes:
 - Country is deliberately NOT a feature: the test set contains France, unseen in
-  training. Features are country-agnostic similarities, so the model transfers.
-- Retrieval context (score, rank, score relative to the best candidate of the same
-  S1 entity) is included: "how good is this candidate compared to the others" is a
-  strong signal for precision-heavy F0.5.
+  training. IDF weights are per-country (learned from each country's own records), so
+  "common word" is judged within the right language automatically.
+- Reverse features encode the one-to-one structure of the data: each S2/S3 record
+  belongs to at most one S1 entity.
 """
 import itertools
 import multiprocessing as mp
 import os
 import re
 import sys
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
 from rapidfuzz.distance import JaroWinkler
+from sklearn.utils import murmurhash3_32
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from blocking.tfidf_blocking import normalize_tokens, skeleton, read_tsv_chunks
+from blocking.tfidf_blocking import (ADDR_CANON, N_FEATURES, NAME_STOP, NUMBER_WORDS,
+                                     normalize_tokens, read_tsv_chunks, skeleton)
+from blocking.reverse import id_code
 
 # Legal / generic suffixes: compared separately so "X Pvt Ltd" vs "X" is not penalised
 # on the core name. Includes France forms; unknown suffixes just stay in the core name.
@@ -31,43 +42,68 @@ LEGAL = {
     "sas", "sarl", "sa", "sasu", "eurl", "sci", "com", "www", "dba", "formerly",
 }
 _digits = re.compile(r"\d+")
+REV_TOP_R = 3  # reverse list length (see blocking/reverse.py)
 
 
-def _prep(name, address):
+@lru_cache(maxsize=4_000_000)
+def _hidx(feat):
+    """Hash bucket of a blocking feature string (identical to FeatureHasher's)."""
+    return abs(murmurhash3_32(feat, seed=0)) % N_FEATURES
+
+
+def _weights(name_tokens, addr_tokens, idf):
+    """IDF weight per name / address token, using the blocking features' names."""
+    if idf is None:
+        return {}, {}
+    nw = {t: float(idf[_hidx("n_" + t)]) for t in name_tokens if t not in NAME_STOP and len(t) >= 2}
+    aw = {}
+    for t in addr_tokens:
+        t = ADDR_CANON.get(t, NUMBER_WORDS.get(t, t))
+        if t.isdigit():
+            f = "d_" + (t.lstrip("0") or "0")
+        elif len(t) >= 3:
+            f = "a_" + t
+        else:
+            continue
+        aw[f] = float(idf[_hidx(f)])
+    return nw, aw
+
+
+def prepare(name, address, idf=None):
+    """Prepared tuple used by pair_features (normalized strings, sets, flags, IDF weights)."""
     nt = normalize_tokens(name)
     core = [t for t in nt if t not in LEGAL]
     at = normalize_tokens(address)
     nums = {t.lstrip("0") or "0" for t in at if t.isdigit()}
+    nw, aw = _weights(nt, at, idf)
     return (" ".join(nt), " ".join(core), " ".join(skeleton(t) for t in core),
-            "".join(core), " ".join(at), nums, set(core), set(at))
+            "".join(core), " ".join(at), nums, set(core), set(at),
+            bool(name) and not name.isascii(), address == "", nw, aw)
 
 
-def prepare(name, address):
-    """Prepared tuple used by pair_features (normalized strings, sets, flags)."""
-    return _prep(name, address) + (bool(name) and not name.isascii(), address == "")
-
-
-def load_records(paths, ids=None):
+def load_records(paths, ids=None, idf_by_country=None):
     """Load records (optionally only the given entity ids) as {id: prepared tuple}."""
     ids = None if ids is None else set(ids)
+    idf_by_country = idf_by_country or {}
     out = {}
     for p in paths:
         for ch in read_tsv_chunks(p, 500_000):
             if ids is not None:
                 ch = ch[ch["entity_id"].isin(ids)]
-            for i, n, a in zip(ch["entity_id"].values, ch["business_name"].values,
-                               ch["business_address"].values):
-                out[i] = prepare(n, a)
+            for i, n, a, c in zip(ch["entity_id"].values, ch["business_name"].values,
+                                  ch["business_address"].values, ch["country"].values):
+                out[i] = prepare(n, a, idf_by_country.get(c))
     return out
 
 
 def load_raw(paths):
-    """{id: (name, address)} for all records - read once, prepare lazily per batch."""
+    """{id: (name, address, country)} for all records - read once, prepare lazily per batch."""
     out = {}
     for p in paths:
         for ch in read_tsv_chunks(p, 500_000):
             out.update(zip(ch["entity_id"].values,
-                           zip(ch["business_name"].values, ch["business_address"].values)))
+                           zip(ch["business_name"].values, ch["business_address"].values,
+                               ch["country"].values)))
     return out
 
 
@@ -75,8 +111,22 @@ def _jacc(a, b):
     return len(a & b) / len(a | b) if (a or b) else 0.0
 
 
-FEATURES = [
-    "score", "rank", "score_rel", "score_gap_best", "n_cands",
+def _wsim(wa, wb):
+    """IDF-weighted overlap: jaccard, coverage of A, coverage of B, heaviest unmatched token each side."""
+    sa, sb = sum(wa.values()), sum(wb.values())
+    sh = sum(w for t, w in wa.items() if t in wb)
+    un = sa + sb - sh
+    return (sh / un if un > 0 else 0.0, sh / sa if sa > 0 else 0.0, sh / sb if sb > 0 else 0.0,
+            max((w for t, w in wa.items() if t not in wb), default=0.0),
+            max((w for t, w in wb.items() if t not in wa), default=0.0))
+
+
+CHEAP_FEATURES = [
+    "score", "rank", "score_rel", "score_gap_best", "fwd",
+    "rscore", "rev_rank", "rev_score_rel", "rev_gap", "rev_margin", "rev_is_best", "rev_best",
+    "a_n_revbest",
+]
+STRING_FEATURES = [
     "name_ratio", "name_tset", "name_tsort", "name_partial", "name_jw",
     "core_ratio", "core_tset", "core_partial", "core_concat_ratio", "skel_ratio", "skel_tset",
     "core_jacc", "name_len_a", "name_len_b",
@@ -84,16 +134,64 @@ FEATURES = [
     "num_jacc", "num_shared", "num_conflict", "num_a", "num_b", "max_shared_num_len",
     "postcode_match", "postcode_conflict",
     "addr_empty_b", "addr_empty_a", "name_nonascii_b", "is_s3",
+    "name_w_jacc", "name_w_cov_a", "name_w_cov_b", "name_w_miss_a", "name_w_miss_b",
+    "addr_w_jacc", "addr_w_cov_a", "addr_w_cov_b", "addr_w_miss_a", "addr_w_miss_b",
 ]
+FEATURES = CHEAP_FEATURES + STRING_FEATURES
+
+
+def union_reverse_candidates(cands, rev, s1_ids):
+    """
+    Add pairs found only from the S2/S3 side: (S1, B) where S1 is among B's top-R S1 matches
+    but B was not in S1's forward top-K. Marked fwd=0, forward score 0.
+    """
+    from blocking.reverse import decode_s1, decode_s23
+    c = cands.assign(fwd=1)
+    codes = id_code(s1_ids)
+    r = rev[rev["s1"].isin(codes)]
+    extra = pd.DataFrame({"source1_entity_id": decode_s1(r["s1"].values),
+                          "candidate_entity_id": decode_s23(r["b"].values),
+                          "score": np.float32(0.0), "fwd": 0})
+    c = pd.concat([c, extra], ignore_index=True)
+    return c.drop_duplicates(["source1_entity_id", "candidate_entity_id"], keep="first").reset_index(drop=True)
+
+
+def add_context_features(cands, rev, rev_sum):
+    """Forward retrieval context + reverse (one-to-one) features. Vectorised."""
+    c = cands.copy()
+    if "fwd" not in c:
+        c["fwd"] = 1
+    g = c.groupby("source1_entity_id")["score"]
+    c["rank"] = g.rank(ascending=False, method="first").astype(np.float32)
+    best = g.transform("max")
+    c["score_rel"] = (c["score"] / best.where(best > 0)).fillna(0.0).astype(np.float32)
+    c["score_gap_best"] = (best - c["score"]).astype(np.float32)
+
+    c["a_code"] = id_code(c["source1_entity_id"].values)
+    c["b_code"] = id_code(c["candidate_entity_id"].values)
+    r = rev[rev["b"].isin(c["b_code"].unique())].rename(columns={"b": "b_code", "s1": "a_code"})
+    c = c.merge(r[["b_code", "a_code", "rscore", "rrank"]], on=["b_code", "a_code"], how="left")
+    c = c.merge(rev_sum, left_on="b_code", right_index=True, how="left")
+    c["rscore"] = c["rscore"].fillna(0.0).astype(np.float32)
+    c["rev_rank"] = c["rrank"].fillna(REV_TOP_R + 1).astype(np.float32)
+    c["rev_best"] = c["rev_best"].fillna(0.0).astype(np.float32)
+    c["rev_second"] = c["rev_second"].fillna(0.0).astype(np.float32)
+    c["rev_score_rel"] = (c["rscore"] / c["rev_best"].where(c["rev_best"] > 0)).fillna(0.0).astype(np.float32)
+    c["rev_gap"] = (c["rev_best"] - c["rscore"]).astype(np.float32)
+    c["rev_margin"] = (c["rev_best"] - c["rev_second"]).astype(np.float32)
+    c["rev_is_best"] = (c["rev_rank"] == 1).astype(np.float32)
+    # how many of this S1's candidates point back to it as their best S1 (entity cardinality hint)
+    c["a_n_revbest"] = c.groupby("source1_entity_id")["rev_is_best"].transform("sum").astype(np.float32)
+    return c.drop(columns=["rrank", "rev_second", "a_code", "b_code"])
 
 
 def _rows(payload):
     """
-    Similarity features for a chunk of pairs. payload = list of (A, B, is_s3) where A/B are
-    prepared record tuples. Returns a compact float32 array (n, n_features): a list of
-    Python float tuples would cost ~1 KB per pair (~7 GB for 7.5M pairs).
+    String features for a chunk of pairs. payload = list of (A, B, is_s3) where A/B are
+    prepared record tuples. Returns a compact float32 array (n, n_string_features): a list
+    of Python float tuples would cost ~1 KB per pair (~7 GB for 7.5M pairs).
     """
-    out = np.empty((len(payload), len(FEATURES) - 5), dtype=np.float32)
+    out = np.empty((len(payload), len(STRING_FEATURES)), dtype=np.float32)
     for k, (A, B, is_s3) in enumerate(payload):
         na, nb = A[5], B[5]
         shared = na & nb
@@ -112,6 +210,7 @@ def _rows(payload):
             max((len(x) for x in shared), default=0),
             float(bool(pa & pb)), float(bool(pa) and bool(pb) and not (pa & pb)),
             float(B[9]), float(A[9]), float(B[8]), float(is_s3),
+            *_wsim(A[10], B[10]), *_wsim(A[11], B[11]),
         )
     return out
 
@@ -122,26 +221,18 @@ def _payloads(a_ids, b_ids, s1_rec, s23_rec, chunk):
                for a, b in zip(a_ids[i:i + chunk], b_ids[i:i + chunk])]
 
 
-def pair_features(cands, s1_rec, s23_rec, n_jobs=None, chunk=20_000):
+def pair_features(ctx, s1_rec, s23_rec, n_jobs=None, chunk=20_000):
     """
-    cands: DataFrame with source1_entity_id, candidate_entity_id, score. Returns features.
+    ctx: output of add_context_features. Appends STRING_FEATURES.
     n_jobs: worker processes for the string similarities (default: all cores). Workers get
     only the small chunk of record tuples they score (never the big dicts), so memory stays
     flat; results come back as float32 arrays. Falls back to 1 process on any pool error.
     """
-    c = cands.copy()
-    g = c.groupby("source1_entity_id")["score"]
-    c["rank"] = g.rank(ascending=False, method="first")
-    best = g.transform("max")
-    c["score_rel"] = c["score"] / best
-    c["score_gap_best"] = best - c["score"]
-    c["n_cands"] = g.transform("size")
-
-    a_ids = c["source1_entity_id"].values
-    b_ids = c["candidate_entity_id"].values
+    a_ids = ctx["source1_entity_id"].values
+    b_ids = ctx["candidate_entity_id"].values
     n_jobs = n_jobs or os.cpu_count() or 1
     parts = None
-    if n_jobs > 1 and len(c) > 4 * chunk:
+    if n_jobs > 1 and len(ctx) > 4 * chunk:
         try:
             parts = []
             gen = _payloads(a_ids, b_ids, s1_rec, s23_rec, chunk)
@@ -154,6 +245,6 @@ def pair_features(cands, s1_rec, s23_rec, n_jobs=None, chunk=20_000):
             parts = None
     if parts is None:
         parts = [_rows(p) for p in _payloads(a_ids, b_ids, s1_rec, s23_rec, chunk)]
-    X = np.vstack(parts) if parts else np.empty((0, len(FEATURES) - 5), np.float32)
-    F = pd.DataFrame(X, columns=FEATURES[5:], index=c.index)
-    return pd.concat([c[["source1_entity_id", "candidate_entity_id"] + FEATURES[:5]], F], axis=1)
+    X = np.vstack(parts) if parts else np.empty((0, len(STRING_FEATURES)), np.float32)
+    F = pd.DataFrame(X, columns=STRING_FEATURES, index=ctx.index)
+    return pd.concat([ctx, F], axis=1)

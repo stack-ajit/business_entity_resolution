@@ -13,10 +13,19 @@ import numpy as np
 import pandas as pd
 
 
-def select(pairs, threshold, rel=0.0, max_matches=10):
+def resolve_one_to_one(pairs):
+    """Each S2/S3 record belongs to at most one S1 (true in the data): keep only its best-p claim."""
+    if pairs.empty:
+        return pairs
+    return pairs.loc[pairs.groupby("candidate_entity_id")["p"].idxmax()]
+
+
+def select(pairs, threshold, rel=0.0, max_matches=10, one_to_one=True):
     """pairs: DataFrame source1_entity_id, candidate_entity_id, p. Returns kept rows."""
     best = pairs.groupby("source1_entity_id")["p"].transform("max")
     kept = pairs[(pairs["p"] >= threshold) & (pairs["p"] >= rel * best)]
+    if one_to_one:
+        kept = resolve_one_to_one(kept)
     kept = kept.sort_values(["source1_entity_id", "p"], ascending=[True, False])
     return kept[kept.groupby("source1_entity_id").cumcount() < max_matches]
 
@@ -39,7 +48,7 @@ def macro_f05(kept, entities):
     return float(f.mean())
 
 
-def tune(pairs, entities, thresholds=None, rels=(0.0, 0.3, 0.5, 0.7), max_ms=(3, 5, 10)):
+def tune(pairs, entities, thresholds=None, rels=(0.0, 0.5, 0.7), max_ms=(10,)):
     """Grid-search the selection rule on validation; returns (best_score, params, table)."""
     thresholds = np.round(np.arange(0.2, 0.91, 0.05), 2) if thresholds is None else thresholds
     rows = []

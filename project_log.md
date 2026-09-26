@@ -282,3 +282,46 @@ Account `stackajit02`, code `d7ae31f` (memory-safe parallel features).
 **Open question:** France (1.43M S2/S3 records; never seen in training). The portal score vs validation 0.9425 will show whether the country-agnostic features transfer.
 
 **Next:** download outputs (gzip first), submit `matching_results.tsv` to the portal, and compare the leaderboard score with validation. Then run validation error analysis and try the one-to-one constraint.
+
+---
+
+## 8. First Leaderboard Result and Diagnosis
+**Public LB: 0.925377 (rank 1378).** Top teams: 0.9906 / 0.9891 / 0.9888. Our validation was 0.9425 and our *oracle* (perfect classifier on our candidates) was 0.977. The leaders are beyond what our candidate set even allows, so tuning cannot close this; the approach needs to change.
+
+### Data-structure findings (all from train ground truth / our test output)
+1. **No leak in file order.** A S1's matches are scattered randomly through the S2/S3 files.
+2. **The data is synthetic with a fixed generator.** India and US have *identical* match-count distributions: 0: 5.6%, 1: 5.4%, 2: 17.0%, 3: 24.0%, 4: 21.9%, 5: 14.6%, 6: 7.5%, 7: 2.9%, 8+: 1.1%; mean 3.46.
+3. **Strictly one-to-one.** 7,638,365 matched S2/S3 ids in train, all unique. Each S2/S3 record belongs to at most one S1. 74% of train S2/S3 records are true matches.
+4. **Our submission violated this.** 43,856 S2/S3 ids were given to >1 S1 → **81,556 guaranteed-wrong pairs** (1.53% of predictions), touching 3.7% of entities.
+5. **We are recall-starved.** Test predictions: mean 2.97–3.15 matches per S1 vs 3.46 true, and "1 match" predicted ~2× as often as it occurs. We predicted 5.26M distinct S2/S3 as matched vs ~6.0M expected.
+6. **France (15% of test S1) over-predicts.** Singletons 4.8% (vs 5.6%) and the most 8+ entities → likely lower precision. If US/India score ≈ validation, France ≈ 0.82.
+7. **Missed pairs are not hopeless.** Median name+address similarity to their S1 is 82%. Retrieval ranks them under look-alikes, and 47% are closer to an already-found sibling than to the S1 itself.
+
+## 9. v2 Pipeline: One-to-One Aware, Two-Stage (candidate set shrinks ~3.5×)
+**Also driven by a new rule on the portal:** *"candidate generation counts toward the final ranking… a smaller candidate set per Source 1 entity will be ranked higher."* v1 sent a fixed 50 candidates per S1.
+
+**Changes (and why):**
+1. **Reverse retrieval** (`src/blocking/reverse.py`): an index over S1, queried with *every* S2/S3 record → its top-3 S1 entities. Ids are stored as int64 codes (~0.6 GB for 30M rows).
+   - **As features:** `rscore` (this S1's score in the candidate's own list), `rev_rank`, `rev_is_best`, `rev_gap` / `rev_score_rel` (vs the candidate's best S1), `rev_margin` (how decisively the candidate points somewhere), and `a_n_revbest` (how many candidates point back to this S1: an entity-cardinality hint). This is how the one-to-one structure enters the model: a look-alike whose best S1 is someone else is pushed down.
+   - **As candidates:** pairs where the S1 is in the record's top-3 but the record wasn't in the S1's forward top-50 are added (`fwd=0`).
+   - Train reverse is computed against **all** 2.2M train S1, just as test uses all 1.73M test S1, so the features mean the same thing in both.
+2. **IDF-weighted token overlap** for name and address separately: jaccard, coverage of each side, and the heaviest *unmatched* token on each side. Rare shared words ("Acme") count, common ones ("Private Limited") don't. The heaviest missing word is a strong "different business" signal. Weights come from the blocking index's per-country IDF by reproducing its hash (`murmurhash3_32(feat) % 2^22`, verified identical to `FeatureHasher`), so France gets its own IDF.
+3. **Two-stage model** (`train_matcher.py`):
+   - **Stage 1** (pruner) uses only the 13 cheap context features. Its threshold is set to keep 99.8% of true candidate pairs. **Survivors are the candidate set** written to `candidate_pairs.tsv`.
+   - **Stage 2** (matcher) uses all 53 features, trained on stage-1 survivors (the same distribution it sees at test).
+   - lr 0.08–0.1 (fewer trees → faster prediction).
+4. **Global one-to-one resolution** (`selection.resolve_one_to_one`): after all test batches, each S2/S3 record keeps only its highest-p S1. This is included in the validation tuning.
+5. **Prediction** only computes string features for stage-1 survivors → expected ~3× faster per batch.
+
+**Local smoke test** (sample world: 10K S1, 134K S2/S3; far easier than real, so numbers only show the direction):
+
+| | v1 | v2 |
+|---|---|---|
+| Candidates per S1 | 50 (fixed) | **13.6** |
+| Stage-1 operating points | — | keep 99.0% → 6.9/S1; 99.5% → 9.3; 99.8% → 14.2; 99.9% → 19.1 |
+| Oracle F0.5 after stage 1 | — | 0.9905 (from 0.9908 before pruning) |
+| Held-out F0.5 (sample) | 0.9768 (val) | **0.9802** (5K entities not used in training) |
+| Predicted matches per S1 | — | 3.37 (truth 3.46); singletons 5.65% (truth 5.6%) |
+| Validator | PASS | PASS |
+
+The reverse score `rscore` immediately became the #2 feature (19% of gain).
