@@ -413,3 +413,44 @@ The reverse direction recovers ~1 point of recall for +11.6% pairs, and stage 1 
 - Test reverse table: 29,845,987 rows. The run resumed from checkpoints (batches 0–900K were saved by an earlier attempt), which confirms the checkpoint design works.
 - **Per-batch time ~395 s**: retrieve + context ~68, stage 1 ~60, string features ~165, stage 2 ~105. Total 3,613 s.
 - Slightly conservative (fewer matches, more singletons than truth) because the tuned threshold is 0.70; this is the right direction under F0.5.
+
+## 11. Public LB v2 = 0.946882 (+2.15 pts over v1) and the next error analysis
+v2 on the LB: **0.9469** (rank 1592 at submission; leaders 0.9908). Validation was 0.9586, so the val→LB gap narrowed from 1.7 pts (v1) to 1.2 pts after making the training world test-like.
+
+v1 → v2 test predictions: one-to-one violations 43,856 → **0**; France 3.28 → 3.13 matches/S1 with singletons 4.8% → 6.0% (truth 5.6%, over-prediction fixed); India 2.97 → 3.06 and US 3.15 → 3.26 (more recall); 20% of entity lists changed (+280K / −166K pairs).
+
+### What the remaining errors look like (held-out entities with ground truth)
+**False merges are generator decoys: near-copies of the S1 record with one detail changed.**
+- **House number nudged by a small amount:** 428→435, 9940→9947, 80→81, 1000→1009 (same street, same city); 1216→1407 Dalamal Tower; "Shop 23"→"#32" on the same plot.
+- **One name word swapped or added:** Universal *Tech*→*Food*, *Omkar*→*Meta* (India) Rubber, Chemical Farmer→+*Overseas*, Jay→*IJC* Consultancy.
+
+**Misses:** 53% were never candidates and 47% were scored just under the threshold. The true-match noise is different from the decoy noise:
+- truncation/padding (Wz-1082→Wz-108, 17954→017954);
+- number words (14th→FOURTEENTH);
+- **acronyms** ("Hariom Trust"→"HT" at the identical address);
+- transliterated names with short addresses;
+- empty-address records with a suffix added ("Housing Fellowship *Enterprises*").
+
+The v2 feature `num_conflict` misses the key case: "1216 vs 1407 Dalamal Tower, **211** Nariman Point" shares 211, so no conflict is flagged.
+
+### v3 additions (pushed together with sibling expansion)
+1. **Generator-aware features (9):**
+   - `num1_eq`, `num1_diff` (first-number equality / absolute difference);
+   - `num1_prefix` (truncation → same business);
+   - `num_near_miss` (numbers differing by 1–20 → decoy);
+   - `num_min_diff`;
+   - `acro_ab` / `acro_ba` (initials of one name = other name);
+   - `name_extra_a` / `name_extra_b` (core words on one side only).
+   - Numbers are extracted in order, including number/ordinal words up to 99 ("fourteenth", "twenty first"); "one/first/second" are excluded as too ambiguous ("first floor").
+   - Unit-checked on the real error examples above.
+2. **Per-entity expected-F0.5 selection** (`select_expected`): for each S1, keep the top-k that maximises 1.25·Σp_top-k / (k + 0.25·(Σp + miss)); keep nothing if P(no match) = Π(1−p) is higher. `miss` and a calibration `power` are tuned on validation. **Training picks whichever rule (threshold vs expected) scores higher on validation** and records it in `selection.json` (`mode`).
+
+**Sample world (held-out, test-like):**
+
+| | v3 | **v3 + generator features** |
+|---|---|---|
+| Validation F0.5 | 0.9809 | **0.9823** |
+| Test-path F0.5 (held-out entities) | — | **0.9852** |
+| False merges / misses | 92 / 495 | **78 / 491** |
+
+Expected-F0.5 selection ties here (0.9820 vs 0.9823) because probabilities are near 0/1 in the easy world. It is kept on auto-select for the harder real data.

@@ -32,7 +32,7 @@ from blocking.tfidf_blocking import build_index, load_idf, query_index, read_tsv
 from blocking.reverse import build_reverse_table, build_s1_index, reverse_summary
 from matching.pair_features import (add_context_features, load_raw, pair_features, prepare,
                                     sibling_expand, union_reverse_candidates)
-from matching.selection import select
+from matching.selection import select, select_expected
 
 T0 = time.time()
 
@@ -112,7 +112,10 @@ def main():
 
     allp = pd.concat([pd.read_parquet(os.path.join(ckpt_dir, f)) for f in sorted(os.listdir(ckpt_dir))],
                      ignore_index=True)
-    kept = select(allp, sel["threshold"], sel["rel"], sel["max_matches"], one_to_one=True)
+    if sel.get("mode") == "expected":
+        kept = select_expected(allp, sel["miss"], sel["power"])
+    else:
+        kept = select(allp, sel["threshold"], sel["rel"], sel["max_matches"], one_to_one=True)
     n_before = (allp["p"] >= sel["threshold"]).sum()
     log(f"{len(allp)} scored pairs; {n_before} above threshold -> {len(kept)} after one-to-one + rules")
 

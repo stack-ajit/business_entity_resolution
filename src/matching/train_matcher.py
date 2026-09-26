@@ -27,7 +27,7 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from config import CACHE_DIR
 from matching.pair_features import CHEAP_FEATURES, FEATURES
-from matching.selection import macro_f05, select, tune
+from matching.selection import macro_f05, select, select_expected, tune, tune_expected
 
 MODEL_DIR = os.path.join(CACHE_DIR, "model_v3")
 T0 = time.time()
@@ -102,6 +102,13 @@ def main():
     print(table.sort_values("f05", ascending=False).head(8).to_string(index=False))
     no121 = macro_f05(select(va2, params["threshold"], params["rel"], params["max_matches"], one_to_one=False), ents_va)
     log(f"same rule without one-to-one resolution = {no121:.4f}")
+    e_score, e_params, e_table = tune_expected(va2, ents_va)
+    log(f"expected-F0.5 per-entity selection = {e_score:.4f} with {e_params}")
+    print(e_table.sort_values("f05", ascending=False).head(5).to_string(index=False))
+    mode = "expected" if e_score > score else "threshold"
+    params.update(e_params)
+    params["mode"] = mode
+    log(f"selection mode used at test time: {mode}")
     log(f"oracle F0.5, all candidates = {macro_f05(va[va['label'] == 1], ents_va):.4f}; "
         f"after stage 1 = {macro_f05(va2[va2['label'] == 1], ents_va):.4f}")
 
@@ -119,7 +126,7 @@ def main():
     f2.save_model(os.path.join(MODEL_DIR, "stage2.txt"))
     with open(os.path.join(MODEL_DIR, "selection.json"), "w") as f:
         json.dump({**params, "stage1_threshold": t1, "stage1_recall": args.stage1_recall,
-                   "val_macro_f05": score, "val_without_one_to_one": no121,
+                   "val_macro_f05": max(score, e_score), "val_threshold_rule": score, "val_expected_rule": e_score, "val_without_one_to_one": no121,
                    "val_cands_per_s1": cands_per_entity(va2, n_va),
                    "stage1_best_iteration": m1.best_iteration,
                    "stage2_best_iteration": m2.best_iteration}, f, indent=2)

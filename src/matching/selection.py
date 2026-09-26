@@ -30,6 +30,41 @@ def select(pairs, threshold, rel=0.0, max_matches=10, one_to_one=True):
     return kept[kept.groupby("source1_entity_id").cumcount() < max_matches]
 
 
+def select_expected(pairs, miss=0.1, power=1.0, floor=0.02, one_to_one=True):
+    """
+    Per-entity expected-F0.5-optimal selection. For each S1, candidates sorted by p; keeping
+    the top k scores in expectation
+        E[F0.5 | k] ~ 1.25 * sum(top-k p) / (k + 0.25 * N),  N = sum(all p) + miss
+    and keeping nothing scores P(no true match) ~ prod(1 - p) (a correct singleton = 1.0).
+    Pick the best k. Adapts per entity instead of one global threshold.
+    miss: expected true matches outside the candidate set (blocking loss).
+    power: calibration tweak, p -> p**power (tuned on validation).
+    """
+    q = pairs[pairs["p"] >= floor].copy()
+    if one_to_one:
+        q = resolve_one_to_one(q)
+    q["q"] = q["p"].clip(1e-6, 1 - 1e-6) ** power
+    q = q.sort_values(["source1_entity_id", "q"], ascending=[True, False])
+    g = q.groupby("source1_entity_id")["q"]
+    k = g.cumcount() + 1
+    cum = g.cumsum()
+    n_exp = g.transform("sum") + miss
+    ef = 1.25 * cum / (k + 0.25 * n_exp)
+    e0 = np.exp(np.log1p(-q["q"]).groupby(q["source1_entity_id"]).transform("sum"))
+    best_ef = ef.groupby(q["source1_entity_id"]).transform("max")
+    k_best = k.where(ef == best_ef).groupby(q["source1_entity_id"]).transform("min")
+    keep = (k <= k_best) & (best_ef > e0)
+    return q[keep].drop(columns="q")
+
+
+def tune_expected(pairs, entities, misses=(0.0, 0.1, 0.2, 0.3, 0.5), powers=(0.8, 1.0, 1.2, 1.5)):
+    rows = [(macro_f05(select_expected(pairs, m, pw), entities), m, pw)
+            for m, pw in itertools.product(misses, powers)]
+    table = pd.DataFrame(rows, columns=["f05", "miss", "power"])
+    best = table.sort_values("f05", ascending=False).iloc[0]
+    return float(best.f05), {"miss": float(best.miss), "power": float(best.power)}, table
+
+
 def macro_f05(kept, entities):
     """
     kept: selected pairs with a 'label' column. entities: DataFrame entity_id, n_true_total

@@ -69,16 +69,51 @@ def _weights(name_tokens, addr_tokens, idf):
     return nw, aw
 
 
+_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+         "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+_ORD = ["zeroth", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+        "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth",
+        "seventeenth", "eighteenth", "nineteenth"]
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+         "ninety": 90, "twentieth": 20, "thirtieth": 30, "fortieth": 40, "fiftieth": 50,
+         "sixtieth": 60, "seventieth": 70, "eightieth": 80, "ninetieth": 90}
+_WORDNUM = {**{w: i for i, w in enumerate(_ONES)}, **{w: i for i, w in enumerate(_ORD)}}
+
+
+def _numbers(tokens):
+    """Ordered integer values in an address: digits plus number/ordinal words up to 99
+    ('fourteenth' -> 14, 'twenty first' -> 21). Leading zeros vanish ('017954' -> 17954)."""
+    out, i = [], 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.isdigit() and len(t) <= 12:
+            out.append(int(t))
+        elif t in _TENS:
+            v = _TENS[t]
+            if i + 1 < len(tokens) and tokens[i + 1] in _WORDNUM and _WORDNUM[tokens[i + 1]] < 10:
+                v += _WORDNUM[tokens[i + 1]]
+                i += 1
+            out.append(v)
+        elif t in _WORDNUM and t not in ("zero", "zeroth", "one", "first", "second"):
+            # 'one'/'first'/'second' are too often plain words ("first floor") to count
+            out.append(_WORDNUM[t])
+        i += 1
+    return tuple(out)
+
+
 def prepare(name, address, idf=None):
-    """Prepared tuple used by pair_features (normalized strings, sets, flags, IDF weights)."""
+    """Prepared tuple used by pair_features (normalized strings, sets, flags, IDF weights,
+    ordered address numbers, name initials)."""
     nt = normalize_tokens(name)
     core = [t for t in nt if t not in LEGAL]
     at = normalize_tokens(address)
     nums = {t.lstrip("0") or "0" for t in at if t.isdigit()}
     nw, aw = _weights(nt, at, idf)
+    initials = "".join(t[0] for t in core) if len(core) >= 2 else ""
     return (" ".join(nt), " ".join(core), " ".join(skeleton(t) for t in core),
             "".join(core), " ".join(at), nums, set(core), set(at),
-            bool(name) and not name.isascii(), address == "", nw, aw)
+            bool(name) and not name.isascii(), address == "", nw, aw,
+            _numbers(at), initials)
 
 
 def load_records(paths, ids=None, idf_by_country=None):
@@ -139,7 +174,30 @@ STRING_FEATURES = [
     "addr_empty_b", "addr_empty_a", "name_nonascii_b", "is_s3",
     "name_w_jacc", "name_w_cov_a", "name_w_cov_b", "name_w_miss_a", "name_w_miss_b",
     "addr_w_jacc", "addr_w_cov_a", "addr_w_cov_b", "addr_w_miss_a", "addr_w_miss_b",
+    # generator-aware: decoys are near-copies with a nudged house number (428 -> 435) or a
+    # swapped name word; true matches get truncation/padding (1082 -> 108) and acronyms (HT)
+    "num1_eq", "num1_diff", "num1_prefix", "num_near_miss", "num_min_diff",
+    "acro_ab", "acro_ba", "name_extra_a", "name_extra_b",
 ]
+
+
+def _numfeat(la, lb):
+    """First-number relation + near-miss counts between two ordered number tuples."""
+    if not la or not lb:
+        return (-1.0, -1.0, 0.0, 0.0, -1.0)
+    a1, b1 = la[0], lb[0]
+    sa, sb = str(a1), str(b1)
+    prefix = float(a1 != b1 and (sa.startswith(sb) or sb.startswith(sa)))
+    setb = set(lb)
+    near, mind = 0, None
+    for x in la:
+        if x in setb:
+            continue
+        d = min(abs(x - y) for y in lb)
+        mind = d if mind is None else min(mind, d)
+        near += 0 < d <= 20
+    return (float(a1 == b1), float(min(abs(a1 - b1), 1_000_000)), prefix, float(near),
+            -1.0 if mind is None else float(min(mind, 1_000_000)))
 FEATURES = CHEAP_FEATURES + STRING_FEATURES
 
 
@@ -266,6 +324,10 @@ def _rows(payload):
             float(bool(pa & pb)), float(bool(pa) and bool(pb) and not (pa & pb)),
             float(B[9]), float(A[9]), float(B[8]), float(is_s3),
             *_wsim(A[10], B[10]), *_wsim(A[11], B[11]),
+            *_numfeat(A[12], B[12]),
+            float(bool(A[13]) and (A[13] in B[6] or A[13] == B[3])),
+            float(bool(B[13]) and (B[13] in A[6] or B[13] == A[3])),
+            float(len(A[6] - B[6])), float(len(B[6] - A[6])),
         )
     return out
 
