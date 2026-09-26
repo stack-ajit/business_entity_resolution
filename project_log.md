@@ -463,3 +463,18 @@ Expected-F0.5 selection ties here (0.9820 vs 0.9823) because probabilities are n
 | **+ sibling neighbours** | **95.88%** (+0.91 pt) |
 
 8,770,608 pairs (+397,853 sibling-only), 498,450 positives. Siblings recover ~18% of the matches that forward+reverse still missed. Stage 2 took 1,296 s (sibling queries ~5 min, features ~13 min in 20K-entity blocks). A pandas FutureWarning about `fillna(False)` downcasting is harmless.
+
+### Kaggle run #5 (v3), stage 3: validation 0.9649 (+0.63 over v2)
+| | v2 | **v3** |
+|---|---|---|
+| Validation macro F0.5 | 0.9586 | **0.9649** |
+| Oracle F0.5 all candidates / after stage 1 | 0.9817 / 0.9810 | **0.9842 / 0.9835** |
+| Candidates per S1 (99.8% kept) | 24.05 | 25.32 (99.5% → 18.7, 99.0% → 13.4) |
+| Selection | threshold 0.70 | **expected-F0.5** (miss 0.5, power 1.5): 0.96493 vs threshold 0.6 rule 0.96479 |
+| Trees stage 1 / stage 2 | 361 / 927 | 625 / 691 |
+
+**Stage-2 importance:** `rev_rank` 21.9%, **`is_anchor` 21.2%**, `rscore` 10.9%, `rev_is_best` 6.5%, `core_partial` 4.7%, `num_jacc` 4.1%, **`num_min_diff` 3.9%**, `addr_tset` 3.4%, `num_conflict` 2.8%, **`num_near_miss` 1.9%**, … `name_extra_b` 0.8%, `sib_best` 0.8%, `num1_diff` 0.7%.
+
+**Reading:** both new ideas are used (the sibling anchor structure and the generator-aware number features). The expected-F0.5 rule and one-to-one resolution each add only ~+0.0002 on validation; one-to-one should matter more on test, where all S1 compete. Expected LB ≈ 0.952–0.956 if the val→LB gap stays ~1.2 pts.
+
+**Remaining gap to 0.98:** the classifier (0.9649 vs oracle 0.9835, −1.9 pts) and the val→LB gap (~1.2 pts, probably France and test composition).
