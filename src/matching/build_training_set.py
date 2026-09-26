@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from config import TRAIN_DIR as TRAIN, CACHE_DIR as CACHE, TRAIN_INDEX, TRAIN_S1_INDEX, TRAIN_REVERSE
 from blocking.tfidf_blocking import load_idf, query_index, read_tsv_chunks
 from blocking.reverse import build_reverse_table, build_s1_index, reverse_summary
-from matching.pair_features import (add_context_features, load_records, pair_features,
+from matching.pair_features import (add_context_features, load_raw, pair_features, prepare,
                                     union_reverse_candidates)
 
 T0 = time.time()
@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--drop-s1-frac", type=float, default=0.18,
                     help="share of train S1 removed from the world to match test's distractor rate")
+    ap.add_argument("--block", type=int, default=20_000, help="S1 entities per feature block (memory)")
     ap.add_argument("--out", default=os.path.join(CACHE, "train_pairs_v2.parquet"))
     args = ap.parse_args()
 
@@ -81,11 +82,24 @@ def main():
     n_true = gt.set_index("source1_entity_id")["matched_entity_ids"].map(
         lambda m: len([x for x in m.split(",") if x]))
 
+    # Memory: prepared records (strings, sets, IDF dicts) cost ~2-3 KB each, so preparing all
+    # ~6M candidate records at once exhausts 30 GB. Keep only raw strings, and prepare +
+    # score in blocks of S1 entities, discarding each block's prepared records afterwards.
     idf = load_idf(TRAIN_INDEX)
-    s1_rec = load_records([s1_path], s1["entity_id"], idf)
-    s23_rec = load_records(s23_paths, ctx["candidate_entity_id"].unique(), idf)
-    log("records loaded, computing features")
-    F = pair_features(ctx, s1_rec, s23_rec)
+    s1_raw = load_raw([s1_path], s1["entity_id"])
+    s23_raw = load_raw(s23_paths, ctx["candidate_entity_id"].unique())
+    log(f"raw records loaded ({len(s23_raw)} candidates), computing features in blocks")
+    ids = s1["entity_id"].values
+    parts = []
+    for i in range(0, len(ids), args.block):
+        blk = ctx[ctx["source1_entity_id"].isin(set(ids[i:i + args.block]))]
+        s1_rec = {a: prepare(*s1_raw[a][:2], idf.get(s1_raw[a][2])) for a in blk["source1_entity_id"].unique()}
+        s23_rec = {b: prepare(*s23_raw[b][:2], idf.get(s23_raw[b][2])) for b in blk["candidate_entity_id"].unique()}
+        parts.append(pair_features(blk, s1_rec, s23_rec))
+        del s1_rec, s23_rec
+        log(f"features: {min(i + args.block, len(ids))}/{len(ids)} S1 entities")
+    F = pd.concat(parts, ignore_index=True)
+    del parts, ctx
     F["label"] = [int((a, b) in truth) for a, b in zip(F["source1_entity_id"], F["candidate_entity_id"])]
     F["n_true_total"] = F["source1_entity_id"].map(n_true).fillna(0).astype(int)
     F.to_parquet(args.out)

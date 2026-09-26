@@ -340,3 +340,15 @@ It runs every stage in order (train index → training pairs → two-stage match
 
 ### v3 prototype signal: sibling expansion
 Idea: an entity's matches are noisy copies of one business, so they resemble each other. Measured on the sample: for the 1,914 true pairs blocking missed, searching the top-k S2/S3 neighbours of the *found* siblings recovers **41.1% (k=3), 55.5% (k=5), 64.5% (k=10)** of them. The sample corpus is small (134K), so full scale will be lower, but blocking misses ~6% of true pairs, so this is the most promising route to the ceiling the 0.99 teams reach.
+
+### Fix: out-of-memory crash while building training features (Kaggle, stage 2)
+**Symptom:** "tried to allocate more memory than is available" at `records loaded, computing features` (8,372,755 pairs = 7,499,036 forward + 873,719 reverse-only). Everything before it had finished and was cached: train S1 index (1,809,593 kept S1), reverse table **30,915,890 rows for 10,312,632 S2/S3 records** (built in ~12 min).
+
+**Causes:**
+1. **All candidate records prepared at once.** ~6M+ prepared tuples (strings, 3 sets, and now 2 IDF dicts each) at ~2–3 KB each is ≥15 GB.
+2. **`fork` on Linux.** Pool workers are forked from that big parent, and Python's GC touching inherited objects copies their memory pages into each worker. This didn't show on Windows, which always uses `spawn`.
+
+**Fix:**
+- Pool uses `spawn`: workers start clean and receive only their 20K-pair chunk.
+- The training-set builder keeps only raw strings (`load_raw(ids=…)`) and prepares + scores records in blocks of 20K S1 entities (`--block`), discarding each block's prepared records.
+- **Verified identical output** to the unblocked version on the sample world: same 232,363 pairs and labels, max feature difference 0.0.

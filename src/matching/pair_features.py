@@ -96,11 +96,14 @@ def load_records(paths, ids=None, idf_by_country=None):
     return out
 
 
-def load_raw(paths):
-    """{id: (name, address, country)} for all records - read once, prepare lazily per batch."""
+def load_raw(paths, ids=None):
+    """{id: (name, address, country)} (optionally only given ids) - prepare lazily per batch."""
+    ids = None if ids is None else set(ids)
     out = {}
     for p in paths:
         for ch in read_tsv_chunks(p, 500_000):
+            if ids is not None:
+                ch = ch[ch["entity_id"].isin(ids)]
             out.update(zip(ch["entity_id"].values,
                            zip(ch["business_name"].values, ch["business_address"].values,
                                ch["country"].values)))
@@ -236,7 +239,9 @@ def pair_features(ctx, s1_rec, s23_rec, n_jobs=None, chunk=20_000):
         try:
             parts = []
             gen = _payloads(a_ids, b_ids, s1_rec, s23_rec, chunk)
-            with mp.Pool(n_jobs) as pool:
+            # spawn, not fork: a forked worker inherits the parent's multi-GB record dicts and
+            # Python's GC touching them copies those pages into every worker (OOM on Kaggle)
+            with mp.get_context("spawn").Pool(n_jobs) as pool:
                 # bounded waves: Pool.imap would drain the generator into its queue at once
                 while wave := list(itertools.islice(gen, n_jobs * 2)):
                     parts += pool.map(_rows, wave, chunksize=1)
