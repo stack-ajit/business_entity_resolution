@@ -262,3 +262,23 @@ At K=100: India 91.64%, US 97.07%; S2 95.16%, S3 94.73%. The ablation ranking he
 - Workers return **float32 arrays** (~120 bytes/row instead of ~1 KB). The serial path uses the same code.
 - Portable (spawn or fork). Verified on Windows: **parallel output is identical to serial**. On 514K pairs: serial 31.1 s, 4 processes 17.9 s (1.7×), 8 processes 13.5 s. Memory stays flat.
 - Notebook: `%cd /kaggle/working` before deleting and re-cloning the repo, which removes the harmless `shell-init: getcwd` warnings.
+
+### Kaggle run #3: FIRST COMPLETE TEST PREDICTION (validator PASS)
+Account `stackajit02`, code `d7ae31f` (memory-safe parallel features).
+
+| Item | Value |
+|---|---|
+| Test S1 entities | 1,732,544 (both files, one row each) |
+| `candidate_pairs.tsv` | 1,732,437 non-empty, **107 empty** (no candidate retrieved); 1.14 GB |
+| `matching_results.tsv` | 1,622,991 non-empty, **109,553 empty = 6.32% predicted singletons**; 91 MB |
+| Official validator | **PASS** (ID-existence check still to run with `--check-ids`) |
+| Test index | France 1.43M records (1 shard), India 4.72M (3), US 3.82M (2): 9,969,589 S2/S3 |
+| Time | ~2.8 h for 18 batches of 100K S1 |
+
+**Per-batch timing** (100K S1 ≈ 5.0M pairs): query ~20 s, features ~205 s (was single-core before; 4 processes now), **predict ~330 s**. Prediction with ~2,050 LightGBM trees is now the bottleneck. Next speed lever: a higher learning rate (fewer trees) and/or dropping zero-importance features.
+
+**Sanity:** predicted singleton rate 6.32% vs 5.6% true singletons in train. That is slightly conservative, which is desirable under precision-heavy F0.5, and plausible given ~6% of true matches are lost in blocking. The rate is stable across batches (~93.5K of 100K entities get matches in every batch), so there is no drift across the file.
+
+**Open question:** France (1.43M S2/S3 records; never seen in training). The portal score vs validation 0.9425 will show whether the country-agnostic features transfer.
+
+**Next:** download outputs (gzip first), submit `matching_results.tsv` to the portal, and compare the leaderboard score with validation. Then run validation error analysis and try the one-to-one constraint.
